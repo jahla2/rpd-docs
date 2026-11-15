@@ -4,6 +4,7 @@ import (
     "context"
     "errors"
     "time"
+
     "github.com/jackc/pgx/v5"
     "github.com/jackc/pgx/v5/pgxpool"
 )
@@ -32,6 +33,7 @@ type Document struct {
     StorageURI string `json:"storage_uri"`
     CreatedAt time.Time `json:"created_at"`
 }
+
 type Job struct {
     ID string `json:"id"`
     TenantID string `json:"tenant_id"`
@@ -41,6 +43,15 @@ type Job struct {
     CreatedAt time.Time `json:"created_at"`
     StartedAt *time.Time `json:"started_at,omitempty"`
     CompletedAt *time.Time `json:"completed_at,omitempty"`
+}
+
+type Artifact struct {
+    ID string `json:"id"`
+    ArtifactType string `json:"artifact_type"`
+    StorageURI string `json:"storage_uri"`
+    ContentType *string `json:"content_type,omitempty"`
+    SizeBytes *int64 `json:"size_bytes,omitempty"`
+    CreatedAt time.Time `json:"created_at"`
 }
 
 func New(ctx context.Context, databaseURL string) (*Store, error) {
@@ -84,6 +95,7 @@ func (s *Store) GetDocument(ctx context.Context, tenantID,id string) (Document,e
       &d.DocumentType,&d.Status,&d.StorageURI,&d.CreatedAt)
     return d,err
 }
+
 func (s *Store) GetJob(ctx context.Context, tenantID,id string) (Job,error) {
     var j Job
     err := s.pool.QueryRow(ctx,`
@@ -94,4 +106,39 @@ func (s *Store) GetJob(ctx context.Context, tenantID,id string) (Job,error) {
       &j.CreatedAt,&j.StartedAt,&j.CompletedAt)
     return j,err
 }
+
+func (s *Store) LatestCanonicalArtifact(ctx context.Context,tenantID,documentID string)(Artifact,error){
+    var a Artifact
+    err:=s.pool.QueryRow(ctx,`
+      SELECT a.id::text,a.artifact_type,a.storage_uri,a.content_type,a.size_bytes,a.created_at
+      FROM artifacts a
+      JOIN document_versions v ON v.id=a.document_version_id
+      WHERE a.tenant_id=$1 AND a.document_id=$2 AND a.artifact_type='CANONICAL_JSON'
+      ORDER BY v.version_number DESC,a.created_at DESC
+      LIMIT 1
+    `,tenantID,documentID).Scan(&a.ID,&a.ArtifactType,&a.StorageURI,&a.ContentType,&a.SizeBytes,&a.CreatedAt)
+    return a,err
+}
+
+func (s *Store) ListArtifacts(ctx context.Context,tenantID,documentID string)([]Artifact,error){
+    rows,err:=s.pool.Query(ctx,`
+      SELECT id::text,artifact_type,storage_uri,content_type,size_bytes,created_at
+      FROM artifacts
+      WHERE tenant_id=$1 AND document_id=$2
+      ORDER BY created_at ASC,id ASC
+    `,tenantID,documentID)
+    if err!=nil { return nil,err }
+    defer rows.Close()
+
+    artifacts:=make([]Artifact,0)
+    for rows.Next(){
+        var a Artifact
+        if err:=rows.Scan(&a.ID,&a.ArtifactType,&a.StorageURI,&a.ContentType,&a.SizeBytes,&a.CreatedAt); err!=nil {
+            return nil,err
+        }
+        artifacts=append(artifacts,a)
+    }
+    return artifacts,rows.Err()
+}
+
 func IsNotFound(err error) bool { return errors.Is(err, pgx.ErrNoRows) }

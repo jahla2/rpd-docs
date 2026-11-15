@@ -8,6 +8,7 @@ import (
     "log/slog"
     "mime/multipart"
     "net/http"
+    "os"
     "path/filepath"
     "strings"
     "time"
@@ -34,6 +35,8 @@ func New(st *store.Store, fs *storage.Local, q *queue.Publisher, defaultTenantID
     mux.HandleFunc("GET /health/ready", s.ready)
     mux.HandleFunc("POST /api/v1/documents", s.upload)
     mux.HandleFunc("GET /api/v1/documents/{id}", s.getDocument)
+    mux.HandleFunc("GET /api/v1/documents/{id}/result", s.getDocumentResult)
+    mux.HandleFunc("GET /api/v1/documents/{id}/artifacts", s.getDocumentArtifacts)
     mux.HandleFunc("GET /api/v1/jobs/{id}", s.getJob)
     return requestLog(logger,mux)
 }
@@ -41,6 +44,7 @@ func New(st *store.Store, fs *storage.Local, q *queue.Publisher, defaultTenantID
 func (s *Server) live(w http.ResponseWriter,_ *http.Request) {
     writeJSON(w,http.StatusOK,map[string]any{"status":"ok","service":"rpd-api"})
 }
+
 func (s *Server) ready(w http.ResponseWriter,r *http.Request) {
     checks := map[string]bool{
         "postgres": s.store.Ping(r.Context()) == nil,
@@ -51,6 +55,7 @@ func (s *Server) ready(w http.ResponseWriter,r *http.Request) {
     status := http.StatusOK; if !ok { status = http.StatusServiceUnavailable }
     writeJSON(w,status,map[string]any{"ready":ok,"checks":checks})
 }
+
 func (s *Server) upload(w http.ResponseWriter,r *http.Request) {
     r.Body = http.MaxBytesReader(w,r.Body,maxUploadBytes)
     if err := r.ParseMultipartForm(maxUploadBytes); err != nil {
@@ -91,18 +96,50 @@ func (s *Server) upload(w http.ResponseWriter,r *http.Request) {
         "document_id":documentID,"job_id":jobID,"run_id":runID,"status":"QUEUED","sha256":saved.SHA256,
     })
 }
+
 func (s *Server) getDocument(w http.ResponseWriter,r *http.Request) {
     d,err := s.store.GetDocument(r.Context(),tenantFrom(r,s.defaultTenantID),r.PathValue("id"))
     if store.IsNotFound(err) { writeError(w,http.StatusNotFound,"NOT_FOUND","document not found"); return }
     if err != nil { writeError(w,http.StatusInternalServerError,"DATABASE_FAILED","failed to read document"); return }
     writeJSON(w,http.StatusOK,d)
 }
+
+func (s *Server) getDocumentResult(w http.ResponseWriter,r *http.Request) {
+    tenantID:=tenantFrom(r,s.defaultTenantID)
+    artifact,err:=s.store.LatestCanonicalArtifact(r.Context(),tenantID,r.PathValue("id"))
+    if store.IsNotFound(err) {
+        writeError(w,http.StatusNotFound,"RESULT_NOT_READY","canonical result is not available"); return
+    }
+    if err!=nil {
+        writeError(w,http.StatusInternalServerError,"DATABASE_FAILED","failed to locate canonical result"); return
+    }
+
+    data,err:=os.ReadFile(artifact.StorageURI)
+    if err!=nil {
+        s.logger.Error("read canonical result","error",err,"artifact_id",artifact.ID)
+        writeError(w,http.StatusInternalServerError,"STORAGE_FAILED","canonical artifact could not be read"); return
+    }
+    w.Header().Set("Content-Type","application/json")
+    w.Header().Set("X-Artifact-ID",artifact.ID)
+    w.WriteHeader(http.StatusOK)
+    _,_=w.Write(data)
+}
+
+func (s *Server) getDocumentArtifacts(w http.ResponseWriter,r *http.Request) {
+    artifacts,err:=s.store.ListArtifacts(r.Context(),tenantFrom(r,s.defaultTenantID),r.PathValue("id"))
+    if err!=nil {
+        writeError(w,http.StatusInternalServerError,"DATABASE_FAILED","failed to list artifacts"); return
+    }
+    writeJSON(w,http.StatusOK,map[string]any{"items":artifacts})
+}
+
 func (s *Server) getJob(w http.ResponseWriter,r *http.Request) {
     j,err := s.store.GetJob(r.Context(),tenantFrom(r,s.defaultTenantID),r.PathValue("id"))
     if store.IsNotFound(err) { writeError(w,http.StatusNotFound,"NOT_FOUND","job not found"); return }
     if err != nil { writeError(w,http.StatusInternalServerError,"DATABASE_FAILED","failed to read job"); return }
     writeJSON(w,http.StatusOK,j)
 }
+
 func tenantFrom(r *http.Request,fallback string) string {
     if v := strings.TrimSpace(r.Header.Get("X-Tenant-ID")); v != "" { return v }
     return fallback
