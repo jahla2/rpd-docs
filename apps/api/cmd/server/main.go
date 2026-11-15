@@ -6,6 +6,7 @@ import (
     "net/http"
     "os"
     "os/signal"
+    "strings"
     "syscall"
     "time"
 
@@ -33,7 +34,7 @@ func main() {
     })
     if err!=nil { logger.Error("storage startup failed","error",err); os.Exit(1) }
     if err:=storageManager.Ready(); err!=nil { logger.Error("storage readiness failed","error",err); os.Exit(1) }
-    if cfg.AuthMode!="disabled" && cfg.APIKeyPepper=="" {
+    if !strings.EqualFold(strings.TrimSpace(cfg.AuthMode),"disabled") && cfg.APIKeyPepper=="" {
         logger.Error("API_KEY_PEPPER is required when authentication is enabled")
         os.Exit(1)
     }

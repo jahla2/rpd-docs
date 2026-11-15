@@ -95,10 +95,13 @@ func (s *Server) downloadExport(w http.ResponseWriter,r *http.Request){
     if storeNotFound(err) { writeError(w,http.StatusNotFound,"NOT_FOUND","export not found"); return }
     if err!=nil { writeError(w,http.StatusInternalServerError,"DATABASE_FAILED","failed to read export"); return }
 
-    if _,err:=os.Stat(export.StorageURI); err!=nil {
+    data,err:=s.storage.Read(export.StorageURI)
+    if err!=nil {
         writeError(w,http.StatusNotFound,"EXPORT_FILE_MISSING","export file is unavailable"); return
     }
     w.Header().Set("Content-Type",export.ContentType)
     w.Header().Set("Content-Disposition",fmt.Sprintf("attachment; filename=%q","reconciliation."+export.Format))
-    http.ServeFile(w,r,export.StorageURI)
+    w.Header().Set("Content-Length",fmt.Sprintf("%d",len(data)))
+    w.WriteHeader(http.StatusOK)
+    _,_=w.Write(data)
 }
