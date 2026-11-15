@@ -13,6 +13,7 @@ import (
     "strings"
     "time"
 
+    "github.com/jahla2/rpd-docs/apps/api/internal/mapping"
     "github.com/jahla2/rpd-docs/apps/api/internal/queue"
     "github.com/jahla2/rpd-docs/apps/api/internal/storage"
     "github.com/jahla2/rpd-docs/apps/api/internal/store"
@@ -26,10 +27,19 @@ type Server struct {
     queue *queue.Publisher
     defaultTenantID string
     logger *slog.Logger
+    invoiceMappings *mapping.Registry
+}
+
+type MappingPreviewRequest struct {
+    Headers []string `json:"headers"`
+    Samples map[string][]string `json:"samples,omitempty"`
 }
 
 func New(st *store.Store, fs *storage.Local, q *queue.Publisher, defaultTenantID string, logger *slog.Logger) http.Handler {
-    s := &Server{store:st,storage:fs,queue:q,defaultTenantID:defaultTenantID,logger:logger}
+    s := &Server{
+        store:st,storage:fs,queue:q,defaultTenantID:defaultTenantID,logger:logger,
+        invoiceMappings:mapping.DefaultInvoiceRegistry(),
+    }
     mux := http.NewServeMux()
     mux.HandleFunc("GET /health/live", s.live)
     mux.HandleFunc("GET /health/ready", s.ready)
@@ -38,6 +48,7 @@ func New(st *store.Store, fs *storage.Local, q *queue.Publisher, defaultTenantID
     mux.HandleFunc("GET /api/v1/documents/{id}/result", s.getDocumentResult)
     mux.HandleFunc("GET /api/v1/documents/{id}/artifacts", s.getDocumentArtifacts)
     mux.HandleFunc("GET /api/v1/jobs/{id}", s.getJob)
+    mux.HandleFunc("POST /api/v1/mapping-templates/preview", s.previewMapping)
     return requestLog(logger,mux)
 }
 
@@ -138,6 +149,30 @@ func (s *Server) getJob(w http.ResponseWriter,r *http.Request) {
     if store.IsNotFound(err) { writeError(w,http.StatusNotFound,"NOT_FOUND","job not found"); return }
     if err != nil { writeError(w,http.StatusInternalServerError,"DATABASE_FAILED","failed to read job"); return }
     writeJSON(w,http.StatusOK,j)
+}
+
+func (s *Server) previewMapping(w http.ResponseWriter,r *http.Request) {
+    var request MappingPreviewRequest
+    decoder:=json.NewDecoder(http.MaxBytesReader(w,r.Body,1<<20))
+    decoder.DisallowUnknownFields()
+    if err:=decoder.Decode(&request); err!=nil {
+        writeError(w,http.StatusBadRequest,"INVALID_MAPPING_REQUEST","invalid JSON body"); return
+    }
+    if len(request.Headers)==0 || len(request.Headers)>200 {
+        writeError(w,http.StatusBadRequest,"INVALID_MAPPING_REQUEST","headers must contain between 1 and 200 values"); return
+    }
+
+    suggestions:=s.invoiceMappings.Suggest(request.Headers)
+    inferred:=make(map[string]string,len(request.Headers))
+    for _,header:=range request.Headers {
+        inferred[header]=mapping.InferType(request.Samples[header])
+    }
+
+    writeJSON(w,http.StatusOK,map[string]any{
+        "document_type":"invoice",
+        "suggestions":suggestions,
+        "inferred_types":inferred,
+    })
 }
 
 func tenantFrom(r *http.Request,fallback string) string {
