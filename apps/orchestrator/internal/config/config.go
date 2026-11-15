@@ -10,6 +10,12 @@ type Config struct {
     AIEngineURL string
     AgentFallbackEnabled bool
     AgentMinConfidence string
+    StorageBackend string
+    S3Endpoint string
+    S3Region string
+    S3Bucket string
+    S3AccessKey string
+    S3SecretKey string
 }
 
 func Load() Config {
@@ -21,6 +27,12 @@ func Load() Config {
         AIEngineURL: value("AI_ENGINE_URL","http://localhost:8000"),
         AgentFallbackEnabled: boolValue("AGENT_FALLBACK_ENABLED",false),
         AgentMinConfidence: value("AGENT_MIN_CONFIDENCE","0.90"),
+        StorageBackend: value("STORAGE_BACKEND","local"),
+        S3Endpoint: value("S3_ENDPOINT",""),
+        S3Region: value("S3_REGION","us-east-1"),
+        S3Bucket: value("S3_BUCKET",""),
+        S3AccessKey: value("S3_ACCESS_KEY",""),
+        S3SecretKey: value("S3_SECRET_KEY",""),
     }
 }
 func value(key,fallback string) string { if v:=os.Getenv(key); v!="" { return v }; return fallback }

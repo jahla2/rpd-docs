@@ -10,6 +10,7 @@ import (
 
     "github.com/jackc/pgx/v5/pgxpool"
     "github.com/jahla2/rpd-docs/apps/orchestrator/internal/config"
+    "github.com/jahla2/rpd-docs/apps/orchestrator/internal/objectstore"
     "github.com/jahla2/rpd-docs/apps/orchestrator/internal/pipeline"
     "github.com/nats-io/nats.go"
 )
@@ -34,8 +35,10 @@ func main() {
         }); addErr!=nil { logger.Error("ensure stream failed","error",addErr); os.Exit(1) }
     }
 
+    obj,err:=objectstore.New(objectstore.Config{Backend:cfg.StorageBackend,Endpoint:cfg.S3Endpoint,Region:cfg.S3Region,Bucket:cfg.S3Bucket,AccessKey:cfg.S3AccessKey,SecretKey:cfg.S3SecretKey})
+    if err!=nil { logger.Error("object storage startup failed","error",err); os.Exit(1) }
     minConfidence,_:=strconv.ParseFloat(cfg.AgentMinConfidence,64)
-    worker:=pipeline.New(db,logger,cfg.StorageRoot,cfg.NativeEnginePath,cfg.AIEngineURL,cfg.AgentFallbackEnabled,minConfidence)
+    worker:=pipeline.New(db,logger,cfg.StorageRoot,cfg.NativeEnginePath,cfg.AIEngineURL,cfg.AgentFallbackEnabled,minConfidence,obj)
     _,err=js.QueueSubscribe("document.preprocess","rpd-preprocess-workers",func(m *nats.Msg){
         var job pipeline.JobMessage
         if err:=json.Unmarshal(m.Data,&job); err!=nil {

@@ -14,6 +14,7 @@ import (
     "time"
 
     "github.com/jackc/pgx/v5/pgxpool"
+    "github.com/jahla2/rpd-docs/apps/orchestrator/internal/objectstore"
     "github.com/jahla2/rpd-docs/apps/orchestrator/internal/validation"
 )
 
@@ -93,14 +94,15 @@ type Worker struct {
     HTTP *http.Client
     AgentFallbackEnabled bool
     AgentMinConfidence float64
+    ObjectStore *objectstore.Client
 }
 
-func New(db *pgxpool.Pool, logger *slog.Logger, storageRoot,nativePath,aiURL string,agentEnabled bool,agentMinConfidence float64) *Worker {
+func New(db *pgxpool.Pool, logger *slog.Logger, storageRoot,nativePath,aiURL string,agentEnabled bool,agentMinConfidence float64,obj *objectstore.Client) *Worker {
     if agentMinConfidence<=0 || agentMinConfidence>1 { agentMinConfidence=0.90 }
     return &Worker{
         DB:db,Logger:logger,StorageRoot:storageRoot,NativeEnginePath:nativePath,AIEngineURL:aiURL,
         HTTP:&http.Client{Timeout:5*time.Minute},
-        AgentFallbackEnabled:agentEnabled,AgentMinConfidence:agentMinConfidence,
+        AgentFallbackEnabled:agentEnabled,AgentMinConfidence:agentMinConfidence,ObjectStore:obj,
     }
 }
 
@@ -116,7 +118,20 @@ func (w *Worker) HandlePreprocess(ctx context.Context, job JobMessage) error {
         return w.fail(ctx,job,fmt.Errorf("create preprocess dir: %w",err))
     }
 
-    cmd:=exec.CommandContext(ctx,w.NativeEnginePath,"prepare",job.InputArtifact,preprocessDir)
+    inputArtifact:=job.InputArtifact
+    if _,statErr:=os.Stat(inputArtifact); statErr!=nil && w.ObjectStore!=nil {
+        sourceURI,_:=job.Options["source_uri"].(string)
+        if sourceURI=="" { return w.fail(ctx,job,fmt.Errorf("input artifact is unavailable locally and source_uri is missing")) }
+        extension:=filepath.Ext(sourceURI)
+        if extension=="" { extension=".bin" }
+        materialized:=filepath.Join(w.StorageRoot,"tenants",job.TenantID,"processing",job.DocumentID,job.RunID,"source","original"+extension)
+        if err:=w.ObjectStore.Materialize(ctx,sourceURI,materialized); err!=nil {
+            return w.fail(ctx,job,fmt.Errorf("materialize source artifact: %w",err))
+        }
+        inputArtifact=materialized
+    }
+
+    cmd:=exec.CommandContext(ctx,w.NativeEnginePath,"prepare",inputArtifact,preprocessDir)
     out,err:=cmd.Output()
     if err!=nil {
         return w.fail(ctx,job,fmt.Errorf("native prepare: %w",err))
@@ -559,21 +574,37 @@ func (w *Worker) createDocumentReviewTask(ctx context.Context,job JobMessage,ver
 
 func (w *Worker) addArtifact(ctx context.Context,job JobMessage,kind,path string,contentType *string) error {
     info,err:=os.Stat(path); if err!=nil { return err }
+    storageURI:=path
+    if w.ObjectStore!=nil {
+        content:="application/octet-stream"
+        if contentType!=nil && *contentType!="" { content=*contentType }
+        key:=filepath.ToSlash(filepath.Join("tenants",job.TenantID,"processing",job.DocumentID,job.RunID,strings.ToLower(kind),filepath.Base(path)))
+        storageURI,err=w.ObjectStore.ArchiveFile(ctx,path,key,content)
+        if err!=nil { return err }
+    }
     _,err=w.DB.Exec(ctx,`
       INSERT INTO artifacts
         (tenant_id,document_id,run_id,artifact_type,storage_uri,content_type,size_bytes)
       VALUES ($1,$2,$3,$4,$5,$6,$7)
-    `,job.TenantID,job.DocumentID,job.RunID,kind,path,contentType,info.Size())
+    `,job.TenantID,job.DocumentID,job.RunID,kind,storageURI,contentType,info.Size())
     return err
 }
 
 func (w *Worker) addVersionArtifact(ctx context.Context,job JobMessage,versionID,kind,path string,contentType *string) error {
     info,err:=os.Stat(path); if err!=nil { return err }
+    storageURI:=path
+    if w.ObjectStore!=nil {
+        content:="application/octet-stream"
+        if contentType!=nil && *contentType!="" { content=*contentType }
+        key:=filepath.ToSlash(filepath.Join("tenants",job.TenantID,"documents",job.DocumentID,versionID,filepath.Base(path)))
+        storageURI,err=w.ObjectStore.ArchiveFile(ctx,path,key,content)
+        if err!=nil { return err }
+    }
     _,err=w.DB.Exec(ctx,`
       INSERT INTO artifacts
         (tenant_id,document_id,document_version_id,run_id,artifact_type,storage_uri,content_type,size_bytes)
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-    `,job.TenantID,job.DocumentID,versionID,job.RunID,kind,path,contentType,info.Size())
+    `,job.TenantID,job.DocumentID,versionID,job.RunID,kind,storageURI,contentType,info.Size())
     return err
 }
 
