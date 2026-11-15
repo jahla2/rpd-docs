@@ -34,7 +34,7 @@ jobs:
       - name: Install native dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libopencv-dev poppler-utils
+          sudo apt-get install -y libopencv-dev poppler-utils python3-reportlab
       - run: cmake -S apps/native-engine -B build/native-engine
       - run: cmake --build build/native-engine --config Release
       - name: Native preprocessing smoke test
@@ -51,3 +51,89 @@ jobs:
           grep -q '"page_count":1' /tmp/rpd-prepare.json
           test -f /tmp/rpd-native-prepare/page-001.png
           test -f /tmp/rpd-native-prepare/page-001-quality.json
+      - name: Multi-page searchable PDF smoke test
+        run: |
+          python3 - <<'PY'
+          from reportlab.pdfgen import canvas
+          pdf = canvas.Canvas("/tmp/rpd-searchable.pdf")
+          for page in (1, 2):
+              pdf.drawString(72, 760, f"ABC Trading Invoice Number INV-00{page}")
+              pdf.drawString(72, 735, "Invoice Date 2026-11-16 Currency PHP")
+              pdf.drawString(72, 710, "Description Quantity Unit Price Line Total")
+              pdf.drawString(72, 685, f"Paper Box {page} 100.00 {page * 100}.00")
+              pdf.showPage()
+          pdf.save()
+          PY
+          rm -rf /tmp/rpd-pdf-out
+          mkdir -p /tmp/rpd-pdf-out
+          ./build/native-engine/rpd-native-engine prepare /tmp/rpd-searchable.pdf /tmp/rpd-pdf-out > /tmp/rpd-pdf.json
+          grep -q '"schema_version":"2.0"' /tmp/rpd-pdf.json
+          grep -q '"page_count":2' /tmp/rpd-pdf.json
+          test "$(grep -o '"searchable_text":true' /tmp/rpd-pdf.json | wc -l)" -eq 2
+          test -f /tmp/rpd-pdf-out/page-001.png
+          test -f /tmp/rpd-pdf-out/page-002.png
+          test -f /tmp/rpd-pdf-out/page-001-bbox.html
+          test -f /tmp/rpd-pdf-out/page-002-bbox.html
+
+
+  database:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: rpd
+          POSTGRES_PASSWORD: rpd
+          POSTGRES_DB: rpd
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U rpd -d rpd"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install PostgreSQL client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+      - name: Apply migrations in order
+        env:
+          PGPASSWORD: rpd
+        run: |
+          for migration in database/migrations/*.sql; do
+            echo "Applying $migration"
+            psql -h 127.0.0.1 -U rpd -d rpd -v ON_ERROR_STOP=1 -f "$migration"
+          done
+      - name: Verify milestone schema
+        env:
+          PGPASSWORD: rpd
+        run: |
+          psql -h 127.0.0.1 -U rpd -d rpd -v ON_ERROR_STOP=1 <<'SQL'
+          SELECT to_regclass('public.processing_pages') IS NOT NULL AS processing_pages_exists \gset
+          SELECT to_regclass('public.job_events') IS NOT NULL AS job_events_exists \gset
+          SELECT to_regclass('public.mapping_templates') IS NOT NULL AS mapping_templates_exists \gset
+          SELECT to_regclass('public.erp_records') IS NOT NULL AS erp_records_exists \gset
+          SELECT to_regclass('public.exports') IS NOT NULL AS exports_exists \gset
+          \if :processing_pages_exists
+          \else
+            \quit 1
+          \endif
+          \if :job_events_exists
+          \else
+            \quit 1
+          \endif
+          \if :mapping_templates_exists
+          \else
+            \quit 1
+          \endif
+          \if :erp_records_exists
+          \else
+            \quit 1
+          \endif
+          \if :exports_exists
+          \else
+            \quit 1
+          \endif
+          SQL
