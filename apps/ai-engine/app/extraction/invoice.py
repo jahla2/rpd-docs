@@ -247,12 +247,79 @@ def _search(blocks: list[dict], pattern: re.Pattern[str], normalizer=None) -> _C
     return None
 
 
+def _column_rule(mapping_config: dict | None, target: str) -> dict | None:
+    if not mapping_config:
+        return None
+    for column in mapping_config.get("columns") or []:
+        if str(column.get("target", "")).strip() == target:
+            return column
+    return None
+
+
+def _search_alias(
+    blocks: list[dict],
+    target: str,
+    mapping_config: dict | None,
+    normalizer=None,
+) -> _Candidate | None:
+    rule = _column_rule(mapping_config, target)
+    if not rule:
+        return None
+
+    for alias in rule.get("source_aliases") or []:
+        alias_text = str(alias).strip()
+        if not alias_text:
+            continue
+        # Match the configured label at a word boundary and capture the
+        # remaining label-value content. Whitespace is flexible but the alias
+        # itself is escaped, so configuration cannot inject a regex.
+        escaped = re.escape(alias_text).replace(r"\ ", r"\s+")
+        pattern = re.compile(
+            rf"(?:^|\b){escaped}\s*[:#-]?\s*(.+)$",
+            re.IGNORECASE,
+        )
+        for block in blocks:
+            text = str(block.get("text", "")).strip()
+            match = pattern.search(text)
+            if not match:
+                continue
+            raw_value = match.group(1).strip()
+            transformed, excluded = _apply_operations(
+                raw_value,
+                list(rule.get("operations") or []),
+            )
+            if excluded:
+                return None
+            value = transformed
+            if value is None:
+                value = normalizer(raw_value) if normalizer else raw_value
+            elif normalizer and not rule.get("operations"):
+                value = normalizer(value)
+            if value is None or str(value).strip() == "":
+                continue
+            return _Candidate(
+                value=str(value),
+                block_id=str(block.get("block_id", "")),
+                confidence=float(block.get("confidence", 0.0)),
+                raw=text,
+            )
+    return None
+
+
 INVOICE_NUMBER = re.compile(
     r"(?:invoice\s*(?:no|number|#|ref)|inv\s*(?:no|#|ref))\s*[:#-]?\s*([A-Z0-9][A-Z0-9\-/]*)",
     re.IGNORECASE,
 )
 INVOICE_DATE = re.compile(
     r"(?:invoice\s*date|date)\s*[:#-]?\s*([A-Z0-9,./-]+(?:\s+[A-Z0-9,./-]+)?)",
+    re.IGNORECASE,
+)
+DUE_DATE = re.compile(
+    r"(?:due\s*date|payment\s*due)\s*[:#-]?\s*([A-Z0-9,./-]+(?:\s+[A-Z0-9,./-]+)?)",
+    re.IGNORECASE,
+)
+PO_NUMBER = re.compile(
+    r"(?:purchase\s*order|po)\s*(?:no|number|#)?\s*[:#-]?\s*([A-Z0-9][A-Z0-9\-/]*)",
     re.IGNORECASE,
 )
 SUBTOTAL = re.compile(
@@ -282,7 +349,10 @@ def _detect_currency(blocks: list[dict]) -> _Candidate | None:
     return None
 
 
-def _supplier_candidate(blocks: list[dict]) -> _Candidate | None:
+def _supplier_candidate(blocks: list[dict], mapping_config: dict | None = None) -> _Candidate | None:
+    configured = _search_alias(blocks, "supplier_name", mapping_config)
+    if configured is not None:
+        return configured
     for block in blocks[:10]:
         text = str(block.get("text", "")).strip()
         if len(text) < 3 or len(text) > 120:
@@ -303,13 +373,20 @@ def extract_invoice(
     table_html: str | None,
     mapping_config: dict | None = None,
 ) -> dict:
-    invoice_number = _search(ocr_blocks, INVOICE_NUMBER)
-    invoice_date = _search(ocr_blocks, INVOICE_DATE, normalize_date)
-    subtotal = _search(ocr_blocks, SUBTOTAL, normalize_decimal)
-    tax = _search(ocr_blocks, TAX_TOTAL, normalize_decimal)
-    grand_total = _search(ocr_blocks, GRAND_TOTAL, normalize_decimal)
-    currency = _detect_currency(ocr_blocks)
-    supplier = _supplier_candidate(ocr_blocks)
+    invoice_number = _search_alias(ocr_blocks, "invoice_number", mapping_config) or _search(ocr_blocks, INVOICE_NUMBER)
+    invoice_date = _search_alias(ocr_blocks, "invoice_date", mapping_config, normalize_date) or _search(ocr_blocks, INVOICE_DATE, normalize_date)
+    due_date = _search_alias(ocr_blocks, "due_date", mapping_config, normalize_date) or _search(ocr_blocks, DUE_DATE, normalize_date)
+    po_number = _search_alias(ocr_blocks, "po_number", mapping_config) or _search(ocr_blocks, PO_NUMBER)
+    subtotal = _search_alias(ocr_blocks, "subtotal", mapping_config, normalize_decimal) or _search(ocr_blocks, SUBTOTAL, normalize_decimal)
+    tax = _search_alias(ocr_blocks, "tax", mapping_config, normalize_decimal) or _search(ocr_blocks, TAX_TOTAL, normalize_decimal)
+    grand_total = _search_alias(ocr_blocks, "grand_total", mapping_config, normalize_decimal) or _search(ocr_blocks, GRAND_TOTAL, normalize_decimal)
+    currency = _search_alias(
+        ocr_blocks,
+        "currency",
+        mapping_config,
+        lambda value: value.strip().upper() if value.strip().upper() in {"PHP", "USD", "EUR"} else None,
+    ) or _detect_currency(ocr_blocks)
+    supplier = _supplier_candidate(ocr_blocks, mapping_config)
 
     items, table_meta = extract_line_items(table_html, mapping_config)
 
@@ -333,6 +410,8 @@ def extract_invoice(
         "supplier_name": _field(supplier, page),
         "invoice_number": _field(invoice_number, page),
         "invoice_date": _field(invoice_date, page),
+        "due_date": _field(due_date, page),
+        "po_number": _field(po_number, page),
         "currency": _field(currency, page, "deterministic_currency"),
         "subtotal": _field(subtotal, page),
         "tax": _field(tax, page),
@@ -410,6 +489,8 @@ def extract_invoice_document(document_id: str, pages: list[dict], mapping_config
         "supplier_name": _pick_field(per_page, "supplier_name"),
         "invoice_number": _pick_field(per_page, "invoice_number"),
         "invoice_date": _pick_field(per_page, "invoice_date"),
+        "due_date": _pick_field(per_page, "due_date"),
+        "po_number": _pick_field(per_page, "po_number"),
         "currency": _pick_field(per_page, "currency"),
         "subtotal": _pick_field(per_page, "subtotal", prefer_later=True),
         "tax": _pick_field(per_page, "tax", prefer_later=True),
