@@ -24,9 +24,25 @@ def normalize_header(value: str) -> str:
     return " ".join(value.split())
 
 
-def map_header(value: str) -> str | None:
+def _aliases(mapping_config: dict | None) -> dict[str, set[str]]:
+    merged = {target: set(values) for target, values in HEADER_ALIASES.items()}
+    if not mapping_config:
+        return merged
+    for column in mapping_config.get("columns") or []:
+        target = str(column.get("target", "")).strip()
+        if not target:
+            continue
+        merged.setdefault(target, set())
+        for alias in column.get("source_aliases") or []:
+            normalized = normalize_header(str(alias))
+            if normalized:
+                merged[target].add(normalized)
+    return merged
+
+
+def map_header(value: str, mapping_config: dict | None = None) -> str | None:
     normalized = normalize_header(value)
-    for target, aliases in HEADER_ALIASES.items():
+    for target, aliases in _aliases(mapping_config).items():
         if normalized == target.replace("_", " ") or normalized in aliases:
             return target
     return None
@@ -110,7 +126,33 @@ def parse_table_html(html: str | None) -> list[list[str]]:
     return parser.rows
 
 
-def extract_line_items(table_html: str | None) -> tuple[list[dict], dict]:
+def _apply_operations(value: str, operations: list[dict]) -> tuple[str | None, bool]:
+    current: str | None = value
+    excluded = False
+    for operation in operations:
+        name = str(operation.get("operation", "")).strip().lower()
+        config = operation.get("config") or {}
+        if name == "exclude":
+            excluded = True
+            current = None
+            break
+        if name == "default" and (current is None or current.strip() == ""):
+            current = str(config.get("value", ""))
+        elif name == "normalize" and current is not None:
+            current = " ".join(current.split())
+            case = str(config.get("case", "")).lower()
+            if case == "upper":
+                current = current.upper()
+            elif case == "lower":
+                current = current.lower()
+        elif name == "decimal" and current is not None:
+            current = normalize_decimal(current)
+        elif name == "date" and current is not None:
+            current = normalize_date(current)
+    return current, excluded
+
+
+def extract_line_items(table_html: str | None, mapping_config: dict | None = None) -> tuple[list[dict], dict]:
     rows = parse_table_html(table_html)
     if not rows:
         return [], {"header_row": None, "mapped_headers": {}}
@@ -119,7 +161,7 @@ def extract_line_items(table_html: str | None) -> tuple[list[dict], dict]:
     header_map: dict[int, str] = {}
 
     for index, row in enumerate(rows[:6]):
-        mapped = {i: target for i, cell in enumerate(row) if (target := map_header(cell))}
+        mapped = {i: target for i, cell in enumerate(row) if (target := map_header(cell, mapping_config))}
         if len(mapped) >= 2 and ("description" in mapped.values() or "line_total" in mapped.values()):
             header_index = index
             header_map = mapped
@@ -137,11 +179,22 @@ def extract_line_items(table_html: str | None) -> tuple[list[dict], dict]:
             value = row[column_index].strip()
             if not value:
                 continue
-            if target in {"quantity", "unit_price", "tax", "line_total"}:
+            column_rule = None
+            if mapping_config:
+                for candidate in mapping_config.get("columns") or []:
+                    if candidate.get("target") == target:
+                        column_rule = candidate
+                        break
+
+            operations = list((column_rule or {}).get("operations") or [])
+            transformed, excluded = _apply_operations(value, operations)
+            if excluded:
+                continue
+
+            if target in {"quantity", "unit_price", "tax", "line_total"} and not operations:
                 normalized = normalize_decimal(value)
-                item[target] = normalized if normalized is not None else value
-            else:
-                item[target] = value
+                transformed = normalized if normalized is not None else value
+            item[target] = transformed if transformed is not None else value
 
         if item and any(item.get(key) for key in ("description", "item_code", "line_total")):
             items.append(item)
@@ -243,7 +296,13 @@ def _supplier_candidate(blocks: list[dict]) -> _Candidate | None:
     return None
 
 
-def extract_invoice(document_id: str, page: int, ocr_blocks: list[dict], table_html: str | None) -> dict:
+def extract_invoice(
+    document_id: str,
+    page: int,
+    ocr_blocks: list[dict],
+    table_html: str | None,
+    mapping_config: dict | None = None,
+) -> dict:
     invoice_number = _search(ocr_blocks, INVOICE_NUMBER)
     invoice_date = _search(ocr_blocks, INVOICE_DATE, normalize_date)
     subtotal = _search(ocr_blocks, SUBTOTAL, normalize_decimal)
@@ -252,7 +311,7 @@ def extract_invoice(document_id: str, page: int, ocr_blocks: list[dict], table_h
     currency = _detect_currency(ocr_blocks)
     supplier = _supplier_candidate(ocr_blocks)
 
-    items, table_meta = extract_line_items(table_html)
+    items, table_meta = extract_line_items(table_html, mapping_config)
 
     required = {
         "supplier_name": supplier,
@@ -317,7 +376,7 @@ def _pick_field(results: list[dict], name: str, prefer_later: bool = False):
     return fields[0]
 
 
-def extract_invoice_document(document_id: str, pages: list[dict]) -> dict:
+def extract_invoice_document(document_id: str, pages: list[dict], mapping_config: dict | None = None) -> dict:
     per_page: list[dict] = []
     all_items: list[dict] = []
     table_mappings: list[dict] = []
@@ -329,6 +388,7 @@ def extract_invoice_document(document_id: str, pages: list[dict]) -> dict:
             page=page,
             ocr_blocks=list(page_data.get("ocr_blocks") or []),
             table_html=page_data.get("table_html"),
+            mapping_config=mapping_config,
         )
         per_page.append(result)
         table_mappings.append({"page": page, **result["table_mapping"]})

@@ -87,6 +87,27 @@ func (s *Server) upload(w http.ResponseWriter,r *http.Request) {
     tenantID := strings.TrimSpace(r.Header.Get("X-Tenant-ID"))
     if tenantID == "" { tenantID = s.defaultTenantID }
 
+    options:=map[string]any{}
+    if templateID:=strings.TrimSpace(r.FormValue("mapping_template_id")); templateID!="" {
+        template,templateErr:=s.store.GetMappingTemplate(r.Context(),tenantID,templateID)
+        if store.IsNotFound(templateErr) {
+            writeError(w,http.StatusBadRequest,"INVALID_MAPPING_TEMPLATE","mapping template not found"); return
+        }
+        if templateErr!=nil {
+            writeError(w,http.StatusInternalServerError,"DATABASE_FAILED","failed to read mapping template"); return
+        }
+        if template.Status!="ACTIVE" {
+            writeError(w,http.StatusConflict,"MAPPING_TEMPLATE_NOT_ACTIVE","selected mapping template must be ACTIVE"); return
+        }
+        var config any
+        if err:=json.Unmarshal(template.Config,&config); err!=nil {
+            writeError(w,http.StatusInternalServerError,"INVALID_MAPPING_TEMPLATE","stored mapping template is invalid"); return
+        }
+        options["mapping_template_id"]=template.ID
+        options["mapping_template_version"]=template.Version
+        options["mapping_config"]=config
+    }
+
     documentID,jobID,runID := newUUID(),newUUID(),newUUID()
     saved,err := s.storage.SaveOriginal(tenantID,documentID,header.Filename,file)
     if err != nil {
@@ -102,7 +123,7 @@ func (s *Server) upload(w http.ResponseWriter,r *http.Request) {
     }
     msg := queue.JobMessage{
         SchemaVersion:"1.0",JobID:jobID,TenantID:tenantID,DocumentID:documentID,
-        RunID:runID,Step:"PREPROCESS",InputArtifact:saved.Path,
+        RunID:runID,Step:"PREPROCESS",InputArtifact:saved.Path,Options:options,
     }
     if err := s.queue.Publish("document.preprocess",msg); err != nil {
         s.logger.Error("publish preprocess","error",err,"document_id",documentID,"job_id",jobID)
@@ -186,7 +207,7 @@ func tenantFrom(r *http.Request,fallback string) string {
 }
 func allowedUpload(h *multipart.FileHeader,mimeType string) bool {
     switch strings.ToLower(filepath.Ext(filepath.Base(h.Filename))) {
-    case ".pdf",".png",".jpg",".jpeg",".tif",".tiff",".csv",".xlsx": return true
+    case ".pdf",".png",".jpg",".jpeg",".tif",".tiff": return true
     }
     return strings.HasPrefix(mimeType,"image/")
 }

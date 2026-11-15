@@ -55,8 +55,13 @@ var allowedTypes=map[string]bool{
 }
 
 var allowedOperations=map[string]bool{
-    "rename":true,"normalize":true,"date":true,"decimal":true,"split":true,
-    "combine":true,"compute":true,"lookup":true,"default":true,"exclude":true,
+    // Keep this list aligned with the extraction runtime. Unsupported
+    // operations are rejected rather than silently ignored.
+    "normalize":true,
+    "date":true,
+    "decimal":true,
+    "default":true,
+    "exclude":true,
 }
 
 func ValidateTemplateConfig(raw json.RawMessage)(TemplateConfig,error){

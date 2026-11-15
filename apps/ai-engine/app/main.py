@@ -179,4 +179,5 @@ def run_invoice_document_extraction(request: InvoiceDocumentExtractRequest) -> d
             }
             for page in request.pages
         ],
+        mapping_config=request.mapping_config,
     )

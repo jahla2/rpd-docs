@@ -25,6 +25,7 @@ type JobMessage struct {
     RunID string `json:"run_id"`
     Step string `json:"step"`
     InputArtifact string `json:"input_artifact"`
+    Options map[string]any `json:"options,omitempty"`
 }
 
 type NativePrepareResult struct {
@@ -278,10 +279,14 @@ func (w *Worker) HandlePreprocess(ctx context.Context, job JobMessage) error {
     if err:=w.setStatus(ctx,job,"TABLES_COMPLETED",false,75); err!=nil { return w.fail(ctx,job,err) }
     if err:=w.setStatus(ctx,job,"MAPPING",false,80); err!=nil { return w.fail(ctx,job,err) }
 
-    canonicalBody,err:=w.postJSON(ctx,"/v1/extract/invoice-document",map[string]any{
+    extractPayload:=map[string]any{
         "document_id":job.DocumentID,
         "pages":extractions,
-    })
+    }
+    if mappingConfig,ok:=job.Options["mapping_config"]; ok {
+        extractPayload["mapping_config"]=mappingConfig
+    }
+    canonicalBody,err:=w.postJSON(ctx,"/v1/extract/invoice-document",extractPayload)
     if err!=nil { return w.fail(ctx,job,fmt.Errorf("multi-page invoice extraction: %w",err)) }
 
     var canonical CanonicalResponse
@@ -370,14 +375,26 @@ func writeArtifactFile(dir,name string,data []byte)(string,error){
 func (w *Worker) createDocumentVersion(ctx context.Context,job JobMessage,documentType string)(string,int,error){
     var id string
     var version int
+    var mappingTemplateID any
+    var mappingTemplateVersion any
+    if raw,ok:=job.Options["mapping_template_id"].(string); ok && raw!="" {
+        mappingTemplateID=raw
+    }
+    switch value:=job.Options["mapping_template_version"].(type) {
+    case float64:
+        mappingTemplateVersion=int(value)
+    case int:
+        mappingTemplateVersion=value
+    }
+
     err:=w.DB.QueryRow(ctx,`
       INSERT INTO document_versions
-        (tenant_id,document_id,version_number,pipeline_version)
-      SELECT $1,$2,COALESCE(MAX(version_number),0)+1,'mvp-0.4'
+        (tenant_id,document_id,version_number,pipeline_version,mapping_template_id,mapping_template_version)
+      SELECT $1,$2,COALESCE(MAX(version_number),0)+1,'mvp-0.4',$3,$4
       FROM document_versions
       WHERE tenant_id=$1 AND document_id=$2
       RETURNING id::text,version_number
-    `,job.TenantID,job.DocumentID).Scan(&id,&version)
+    `,job.TenantID,job.DocumentID,mappingTemplateID,mappingTemplateVersion).Scan(&id,&version)
     if err!=nil { return "",0,err }
 
     _,err=w.DB.Exec(ctx,`
