@@ -426,6 +426,7 @@ Every tenant-owned table is tenant-scoped. Index candidate fields before fuzzy p
 - `POST /api/v1/datasets`
 - `POST /api/v1/datasets/{id}/import`
 - `GET /api/v1/datasets/{id}/records`
+- `GET /api/v1/datasets/{id}/imports`
 
 ### Reconciliation
 - `POST /api/v1/reconciliation-runs`
@@ -540,7 +541,7 @@ Non-goals for MVP: Kubernetes, dozens of microservices, fully autonomous financi
 - [x] line-sum/subtotal validation
 - [x] subtotal/tax/grand-total validation
 - [x] validation evidence artifact
-- [ ] richer configurable column profiling statistics
+- [x] richer configurable column profiling statistics
 
 ### Phase 5 — ERP and reconciliation
 - [x] dataset APIs
@@ -560,7 +561,7 @@ Non-goals for MVP: Kubernetes, dozens of microservices, fully autonomous financi
 - [x] async queued reconciliation worker
 - [x] run progress/events/cancellation
 - [x] grouped-match persistence and export visibility
-- [ ] persisted original ERP import file/provenance artifact
+- [x] persisted original ERP import file/provenance artifact
 - [ ] PO/GRN/invoice three-way matching (post-MVP)
 
 ### Phase 6 — review, agentic fallback and export
