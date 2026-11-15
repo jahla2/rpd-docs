@@ -1,6 +1,7 @@
 #include "image_processor.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <fstream>
@@ -8,11 +9,13 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #ifdef RPD_WITH_OPENCV
 #include <opencv2/core.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
+#include <opencv2/photo.hpp>
 #endif
 
 namespace rpd {
@@ -85,14 +88,12 @@ double estimate_skew(const cv::Mat& gray) {
     const cv::RotatedRect box = cv::minAreaRect(points);
     double angle = box.angle;
 
-    // OpenCV minAreaRect angle conventions vary by geometry.
     if (angle < -45.0) {
         angle += 90.0;
     } else if (angle > 45.0) {
         angle -= 90.0;
     }
 
-    // Ignore implausible corrections; OCR orientation is a separate concern.
     if (std::abs(angle) > 15.0) {
         return 0.0;
     }
@@ -146,14 +147,13 @@ PreprocessResult preprocess_with_opencv(
     cv::Mat enhanced;
     clahe->apply(denoised, enhanced);
 
-    // Preserve sufficient OCR resolution, but prevent extreme images from
-    // consuming unbounded memory. Upscale only genuinely small scans.
     cv::Mat processed = enhanced;
     const int min_dimension = std::min(processed.cols, processed.rows);
     if (min_dimension > 0 && min_dimension < 1200) {
         const double scale = 1200.0 / static_cast<double>(min_dimension);
         cv::resize(processed, processed, cv::Size(), scale, scale, cv::INTER_CUBIC);
     }
+
     const int max_dimension = std::max(processed.cols, processed.rows);
     if (max_dimension > 5000) {
         const double scale = 5000.0 / static_cast<double>(max_dimension);
@@ -167,8 +167,6 @@ PreprocessResult preprocess_with_opencv(
     quality.ink_ratio = calculate_ink_ratio(processed);
     quality.blank = *quality.ink_ratio < 0.0025;
 
-    // A simple bounded quality indicator for routing/debugging, not an OCR
-    // confidence score. It intentionally combines measurable image properties.
     const double sharpness_score = std::clamp(*quality.sharpness / 800.0, 0.0, 1.0);
     const double contrast_score = std::clamp(*quality.contrast / 64.0, 0.0, 1.0);
     const double ink_score = std::clamp(*quality.ink_ratio / 0.08, 0.0, 1.0);
@@ -238,8 +236,6 @@ std::filesystem::path ImageProcessor::rasterize_pdf_first_page(
     const auto prefix = output_dir / "raster-page-001";
     const auto output = prefix.string() + ".png";
 
-    // pdftoppm is provided by Poppler and is intentionally called as a
-    // deployment dependency instead of statically embedding a PDF renderer.
     const std::string command =
         "pdftoppm -f 1 -singlefile -r 200 -png " +
         shell_quote(input.string()) + " " +
@@ -274,12 +270,11 @@ PreprocessResult ImageProcessor::preprocess(
 #ifdef RPD_WITH_OPENCV
     return preprocess_with_opencv(source, output_dir, mode);
 #else
-    // Safe fallback keeps the service usable in minimal builds, but production
-    // deployments should install OpenCV to enable real image preprocessing.
     auto extension = source.extension();
     if (extension.empty()) {
         extension = ".bin";
     }
+
     const auto output = output_dir / ("page-001" + extension.string());
     std::filesystem::copy_file(
         source,

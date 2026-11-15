@@ -5,7 +5,7 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-find_package(OpenCV QUIET COMPONENTS core imgcodecs imgproc)
+find_package(OpenCV QUIET COMPONENTS core imgcodecs imgproc photo)
 
 add_executable(rpd-native-engine
     src/main.cpp
