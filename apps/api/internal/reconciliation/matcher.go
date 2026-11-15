@@ -24,6 +24,7 @@ type Result struct {
     TargetID string `json:"target_id"`
     Status string `json:"status"`
     Score int `json:"score"`
+    MatchingRule string `json:"matching_rule"`
     Difference string `json:"difference"`
     Evidence map[string]any `json:"evidence"`
 }
@@ -45,8 +46,14 @@ func Match(source,target Record,absoluteTolerance string,dateWindowDays int) (Re
     currencyEqual:=strings.EqualFold(strings.TrimSpace(source.Currency),strings.TrimSpace(target.Currency))
     amountExact:=diff.Sign()==0
     amountWithin:=diff.Cmp(tolerance)<=0
-    days:=int(source.Date.Sub(target.Date).Hours()/24); if days<0 { days=-days }
-    dateWithin:=days<=dateWindowDays
+
+    dateWithin:=true
+    days:=0
+    if !source.Date.IsZero() && !target.Date.IsZero() {
+        days=int(source.Date.Sub(target.Date).Hours()/24)
+        if days<0 { days=-days }
+        dateWithin=days<=dateWindowDays
+    }
 
     score:=0
     if referenceEqual { score+=40 }
@@ -56,20 +63,21 @@ func Match(source,target Record,absoluteTolerance string,dateWindowDays int) (Re
     if currencyEqual { score+=5 }
 
     status:="UNMATCHED"
+    rule:="none"
     switch {
     case referenceEqual && supplierEqual && amountExact && currencyEqual:
-        status="MATCHED_EXACT"
+        status="MATCHED_EXACT"; rule="supplier_reference_amount_currency"
     case referenceEqual && supplierEqual && amountWithin && currencyEqual:
-        status="MATCHED_TOLERANCE"
+        status="MATCHED_TOLERANCE"; rule="supplier_reference_amount_tolerance"
     case score>=75:
-        status="MATCHED_COMPOSITE"
+        status="MATCHED_COMPOSITE"; rule="weighted_composite"
     case score>=60:
-        status="SUGGESTED_MATCH"
+        status="SUGGESTED_MATCH"; rule="weighted_suggestion"
     }
 
     return Result{
         SourceID:source.ID,TargetID:target.ID,Status:status,Score:score,
-        Difference:diff.FloatString(4),
+        MatchingRule:rule,Difference:diff.FloatString(4),
         Evidence:map[string]any{
             "supplier_equal":supplierEqual,"reference_equal":referenceEqual,
             "currency_equal":currencyEqual,"amount_exact":amountExact,
