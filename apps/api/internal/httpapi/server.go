@@ -232,6 +232,7 @@ func (s *Server) previewMapping(w http.ResponseWriter,r *http.Request) {
         "document_type":"invoice",
         "suggestions":suggestions,
         "inferred_types":inferred,
+        "profiles":mapping.ProfileColumns(request.Headers,request.Samples),
     })
 }
 
