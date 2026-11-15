@@ -12,6 +12,7 @@ func TestExactMatch(t *testing.T) {
     got,err:=Match(source,target,"0.01",3)
     if err!=nil { t.Fatal(err) }
     if got.Status!="MATCHED_EXACT" || got.Score!=100 { t.Fatalf("got %#v",got) }
+    if got.MatchingRule!="supplier_reference_amount_currency" { t.Fatalf("rule=%q",got.MatchingRule) }
 }
 
 func TestToleranceMatch(t *testing.T) {
@@ -21,4 +22,13 @@ func TestToleranceMatch(t *testing.T) {
     got,err:=Match(source,target,"0.02",3)
     if err!=nil { t.Fatal(err) }
     if got.Status!="MATCHED_TOLERANCE" { t.Fatalf("status=%s score=%d",got.Status,got.Score) }
+}
+
+func TestMissingDatesDoNotPenalizeMatch(t *testing.T) {
+    source:=Record{ID:"doc1",Supplier:"ABC",Reference:"INV-1",Currency:"PHP",Amount:"100.00"}
+    target:=Record{ID:"erp1",Supplier:"ABC",Reference:"INV1",Currency:"PHP",Amount:"100.00"}
+    got,err:=Match(source,target,"0.01",3)
+    if err!=nil { t.Fatal(err) }
+    if got.Status!="MATCHED_EXACT" { t.Fatalf("got %#v",got) }
+    if got.Score!=100 { t.Fatalf("score=%d",got.Score) }
 }
