@@ -1,0 +1,56 @@
+{
+  "documents": [
+    {
+      "id": "invoice-001",
+      "expected_fields": {
+        "supplier_name": "ABC Trading Ltd",
+        "invoice_number": "INV-001",
+        "invoice_date": "2026-11-16",
+        "currency": "PHP",
+        "grand_total": "112.00"
+      },
+      "actual_fields": {
+        "supplier_name": "ABC Trading Ltd",
+        "invoice_number": "INV-001",
+        "invoice_date": "2026-11-16",
+        "currency": "PHP",
+        "grand_total": "112.00"
+      },
+      "expected_line_items": [
+        {"description": "Paper Box", "quantity": "2", "unit_price": "50.00", "line_total": "100.00"}
+      ],
+      "actual_line_items": [
+        {"description": "Paper Box", "quantity": "2", "unit_price": "50.00", "line_total": "100.00"}
+      ]
+    },
+    {
+      "id": "invoice-002",
+      "expected_fields": {
+        "supplier_name": "XYZ Supply",
+        "invoice_number": "INV-002",
+        "invoice_date": "2026-11-17",
+        "currency": "PHP",
+        "grand_total": "900.00"
+      },
+      "actual_fields": {
+        "supplier_name": "XYZ Supply",
+        "invoice_number": "INV-002",
+        "invoice_date": "2026-11-17",
+        "currency": "PHP",
+        "grand_total": "900.00"
+      },
+      "expected_line_items": [],
+      "actual_line_items": []
+    }
+  ],
+  "reconciliation": {
+    "expected_matches": [
+      ["invoice-001", "erp-001"],
+      ["invoice-002", "erp-002"]
+    ],
+    "actual_matches": [
+      ["invoice-001", "erp-001"],
+      ["invoice-002", "erp-002"]
+    ]
+  }
+}

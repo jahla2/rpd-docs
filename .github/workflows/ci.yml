@@ -137,3 +137,23 @@ jobs:
             \quit 1
           \endif
           SQL
+
+
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23.x"
+      - name: Golden quality metric smoke
+        run: |
+          python benchmarks/evaluate.py benchmarks/fixtures/golden_smoke.json \
+            --min-field-accuracy 0.95 \
+            --min-line-accuracy 0.95 \
+            --min-reconciliation-f1 0.95
+      - name: Reconciliation microbenchmarks
+        run: go test ./apps/api/internal/reconciliation -run '^$' -bench 'Benchmark(Match|FindAmountCombination)$' -benchtime=100x
