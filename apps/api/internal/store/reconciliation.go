@@ -99,6 +99,9 @@ func (s *Store) CandidateERPRecords(
     tolerance string,
     dateWindowDays int,
 )([]CandidateRecord,error){
+    var dateArg any
+    if recordDate!=nil { dateArg=*recordDate }
+
     rows,err:=s.pool.Query(ctx,`
       SELECT id::text,COALESCE(external_record_id,''),record_date,
              COALESCE(supplier_name,''),COALESCE(reference,''),COALESCE(currency,''),amount::text
@@ -124,7 +127,7 @@ func (s *Store) CandidateERPRecords(
         ABS(amount-$6::numeric),
         record_date NULLS LAST
       LIMIT 50
-    `,tenantID,datasetID,normalizedReference,normalizedSupplier,currency,amount,recordDate,tolerance,dateWindowDays)
+    `,tenantID,datasetID,normalizedReference,normalizedSupplier,currency,amount,dateArg,tolerance,dateWindowDays)
     if err!=nil { return nil,err }
     defer rows.Close()
 
