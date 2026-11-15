@@ -1,0 +1,43 @@
+package main
+
+import (
+    "context"
+    "log/slog"
+    "net/http"
+    "os"
+    "os/signal"
+    "syscall"
+    "time"
+
+    "github.com/jahla2/rpd-docs/apps/api/internal/config"
+    "github.com/jahla2/rpd-docs/apps/api/internal/httpapi"
+    "github.com/jahla2/rpd-docs/apps/api/internal/queue"
+    "github.com/jahla2/rpd-docs/apps/api/internal/storage"
+    "github.com/jahla2/rpd-docs/apps/api/internal/store"
+)
+
+func main() {
+    logger:=slog.New(slog.NewJSONHandler(os.Stdout,nil))
+    cfg:=config.Load()
+    st,err:=store.New(context.Background(),cfg.DatabaseURL)
+    if err != nil { logger.Error("postgres startup failed","error",err); os.Exit(1) }
+    defer st.Close()
+    q,err:=queue.NewPublisher(cfg.NATSURL)
+    if err != nil { logger.Error("nats startup failed","error",err); os.Exit(1) }
+    defer q.Close()
+
+    srv:=&http.Server{
+        Addr:cfg.HTTPAddr,
+        Handler:httpapi.New(st,storage.NewLocal(cfg.StorageRoot),q,cfg.DefaultTenantID,logger),
+        ReadHeaderTimeout:10*time.Second,
+    }
+    go func(){
+        logger.Info("api_started","addr",cfg.HTTPAddr)
+        if err:=srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+            logger.Error("api_failed","error",err); os.Exit(1)
+        }
+    }()
+    stop:=make(chan os.Signal,1); signal.Notify(stop,syscall.SIGINT,syscall.SIGTERM); <-stop
+    ctx,cancel:=context.WithTimeout(context.Background(),15*time.Second); defer cancel()
+    _=srv.Shutdown(ctx)
+}
