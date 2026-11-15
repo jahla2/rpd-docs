@@ -497,31 +497,52 @@ Non-goals for MVP: Kubernetes, dozens of microservices, fully autonomous financi
 - [ ] table-region detector
 
 ### Phase 4 — mapping/canonical
-- [ ] header-row detector
-- [ ] alias registry APIs
-- [ ] data-type inferencer
-- [ ] column profiler
-- [ ] mapping preview
-- [ ] canonical invoice extractor
-- [ ] financial validation
+- [x] deterministic header normalization
+- [x] invoice alias registry
+- [x] data-type inferencer
+- [x] mapping preview API
+- [x] canonical invoice extractor
+- [x] OCR-guided table-region detector
+- [x] deterministic line-item header mapping
+- [ ] persisted mapping-template CRUD/version activation
+- [ ] richer column profile statistics
+- [ ] complete financial subtotal/tax validation rules
 
 ### Phase 5 — ERP/reconciliation
-- [ ] CSV parser
-- [ ] XLSX parser
-- [ ] ERP canonicalization
-- [ ] indexed candidate generator
-- [ ] exact match
-- [ ] composite scoring
-- [ ] amount tolerance
-- [ ] date window
-- [ ] duplicate detection
-- [ ] review exceptions
+- [x] dataset creation/query APIs
+- [x] CSV parser
+- [x] XLSX parser
+- [x] automatic ERP header detection/mapping
+- [x] optional header mapping overrides
+- [x] ERP canonicalization
+- [x] decimal-safe amount normalization
+- [x] row validation
+- [x] dataset-local duplicate row detection
+- [x] indexed candidate generator
+- [x] exact match
+- [x] composite scoring
+- [x] amount tolerance
+- [x] date window
+- [x] ambiguous/equal-score duplicate detection
+- [x] persisted match evidence
+- [x] reconciliation exceptions
+- [x] reviewer approve/reject endpoints
+- [x] review-task resolution with audit event
+- [ ] fuzzy supplier similarity beyond normalized exact matching
+- [ ] async reconciliation for large batches
+- [ ] persisted original ERP import artifact/provenance
 
 ### Phase 6 — export/AI
-- [ ] JSON/CSV/XLSX output profiles
+- [x] JSON reconciliation export
+- [x] CSV reconciliation export
+- [x] XLSX reconciliation export
+- [x] persisted export metadata/download endpoint
+- [x] basic review workflow
+- [ ] configurable output profiles
+- [ ] configurable output column order
 - [ ] selective agent fallback
 - [ ] structured agent evidence
-- [ ] human corrections and audit
+- [ ] full field/line-item correction workflow
 
 ## 17. Development order
 
