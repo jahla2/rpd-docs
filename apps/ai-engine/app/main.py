@@ -10,7 +10,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from app.extraction.invoice import extract_invoice
+from app.extraction.invoice import extract_invoice, extract_invoice_document\nfrom app.pdftext.poppler import parse_bbox_layout
 from app.ocr.rapidocr_adapter import RapidOCREngine
 from app.tables.region import detect_table_region, translate_ocr_blocks
 from app.tables.slanet_adapter import SLANetTableEngine
@@ -147,4 +147,36 @@ def run_invoice_extraction(request: InvoiceExtractRequest) -> dict[str, Any]:
         page=request.page,
         ocr_blocks=[block.model_dump() for block in request.ocr_blocks],
         table_html=request.table_html,
+    )
+
+
+@app.post("/v1/pdftext")
+def run_pdf_text(request: PDFTextRequest) -> dict:
+    try:
+        return parse_bbox_layout(
+            layout_path=request.layout_path,
+            image_path=request.image_path,
+            document_id=request.document_id,
+            page=request.page,
+        )
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"PDF_TEXT_FAILED: {exc}") from exc
+
+
+@app.post("/v1/extract/invoice-document")
+def run_invoice_document_extraction(request: InvoiceDocumentExtractRequest) -> dict[str, Any]:
+    if not request.pages:
+        raise HTTPException(status_code=400, detail="pages must not be empty")
+    return extract_invoice_document(
+        document_id=request.document_id,
+        pages=[
+            {
+                "page": page.page,
+                "ocr_blocks": [block.model_dump() for block in page.ocr_blocks],
+                "table_html": page.table_html,
+            }
+            for page in request.pages
+        ],
     )

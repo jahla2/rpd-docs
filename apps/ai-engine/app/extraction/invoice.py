@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -39,6 +40,7 @@ def normalize_decimal(value: str) -> str | None:
         .replace("€", "")
         .replace("PHP", "")
         .replace("USD", "")
+        .replace("EUR", "")
         .strip()
     )
     if cleaned == "":
@@ -200,8 +202,16 @@ INVOICE_DATE = re.compile(
     r"(?:invoice\s*date|date)\s*[:#-]?\s*([A-Z0-9,./-]+(?:\s+[A-Z0-9,./-]+)?)",
     re.IGNORECASE,
 )
+SUBTOTAL = re.compile(
+    r"(?:sub\s*total|subtotal)\s*[:#-]?\s*(?:PHP|USD|EUR|₱|\$|€)?\s*([0-9][0-9,]*(?:\.[0-9]{1,4})?)",
+    re.IGNORECASE,
+)
+TAX_TOTAL = re.compile(
+    r"(?:tax|vat|gst)\s*(?:total|amount)?\s*[:#-]?\s*(?:PHP|USD|EUR|₱|\$|€)?\s*([0-9][0-9,]*(?:\.[0-9]{1,4})?)",
+    re.IGNORECASE,
+)
 GRAND_TOTAL = re.compile(
-    r"(?:grand\s*total|invoice\s*total|total\s*due|amount\s*due|total)\s*[:#-]?\s*(?:PHP|USD|₱|\$)?\s*([0-9][0-9,]*(?:\.[0-9]{1,4})?)",
+    r"(?:grand\s*total|invoice\s*total|total\s*due|amount\s*due|total)\s*[:#-]?\s*(?:PHP|USD|EUR|₱|\$|€)?\s*([0-9][0-9,]*(?:\.[0-9]{1,4})?)",
     re.IGNORECASE,
 )
 
@@ -220,7 +230,7 @@ def _detect_currency(blocks: list[dict]) -> _Candidate | None:
 
 
 def _supplier_candidate(blocks: list[dict]) -> _Candidate | None:
-    for block in blocks[:8]:
+    for block in blocks[:10]:
         text = str(block.get("text", "")).strip()
         if len(text) < 3 or len(text) > 120:
             continue
@@ -236,6 +246,8 @@ def _supplier_candidate(blocks: list[dict]) -> _Candidate | None:
 def extract_invoice(document_id: str, page: int, ocr_blocks: list[dict], table_html: str | None) -> dict:
     invoice_number = _search(ocr_blocks, INVOICE_NUMBER)
     invoice_date = _search(ocr_blocks, INVOICE_DATE, normalize_date)
+    subtotal = _search(ocr_blocks, SUBTOTAL, normalize_decimal)
+    tax = _search(ocr_blocks, TAX_TOTAL, normalize_decimal)
     grand_total = _search(ocr_blocks, GRAND_TOTAL, normalize_decimal)
     currency = _detect_currency(ocr_blocks)
     supplier = _supplier_candidate(ocr_blocks)
@@ -263,6 +275,8 @@ def extract_invoice(document_id: str, page: int, ocr_blocks: list[dict], table_h
         "invoice_number": _field(invoice_number, page),
         "invoice_date": _field(invoice_date, page),
         "currency": _field(currency, page, "deterministic_currency"),
+        "subtotal": _field(subtotal, page),
+        "tax": _field(tax, page),
         "grand_total": _field(grand_total, page),
         "line_items": items,
         "table_mapping": table_meta,
@@ -273,3 +287,88 @@ def extract_invoice(document_id: str, page: int, ocr_blocks: list[dict], table_h
         },
         "requires_review": bool(missing or low_confidence),
     }
+
+
+def _field_confidence(field: dict | None) -> float:
+    if not field:
+        return -1.0
+    evidence = field.get("evidence") or {}
+    return float(evidence.get("confidence", 0.0))
+
+
+def _field_page(field: dict | None) -> int:
+    if not field:
+        return 0
+    evidence = field.get("evidence") or {}
+    return int(evidence.get("page", 0))
+
+
+def _pick_field(results: list[dict], name: str, prefer_later: bool = False):
+    fields = [result.get(name) for result in results if result.get(name)]
+    if not fields:
+        return None
+    fields.sort(
+        key=lambda field: (
+            _field_confidence(field),
+            _field_page(field) if prefer_later else -_field_page(field),
+        ),
+        reverse=True,
+    )
+    return fields[0]
+
+
+def extract_invoice_document(document_id: str, pages: list[dict]) -> dict:
+    per_page: list[dict] = []
+    all_items: list[dict] = []
+    table_mappings: list[dict] = []
+
+    for page_data in sorted(pages, key=lambda value: int(value.get("page", 0))):
+        page = int(page_data["page"])
+        result = extract_invoice(
+            document_id=document_id,
+            page=page,
+            ocr_blocks=list(page_data.get("ocr_blocks") or []),
+            table_html=page_data.get("table_html"),
+        )
+        per_page.append(result)
+        table_mappings.append({"page": page, **result["table_mapping"]})
+        for item in result.get("line_items") or []:
+            all_items.append({"page": page, **item})
+
+    deduped_items: list[dict] = []
+    seen: set[str] = set()
+    for item in all_items:
+        signature = json.dumps(item, sort_keys=True, separators=(",", ":"))
+        if signature not in seen:
+            seen.add(signature)
+            deduped_items.append(item)
+
+    merged = {
+        "schema_version": "1.0",
+        "document_id": document_id,
+        "document_type": "invoice",
+        "supplier_name": _pick_field(per_page, "supplier_name"),
+        "invoice_number": _pick_field(per_page, "invoice_number"),
+        "invoice_date": _pick_field(per_page, "invoice_date"),
+        "currency": _pick_field(per_page, "currency"),
+        "subtotal": _pick_field(per_page, "subtotal", prefer_later=True),
+        "tax": _pick_field(per_page, "tax", prefer_later=True),
+        "grand_total": _pick_field(per_page, "grand_total", prefer_later=True),
+        "line_items": deduped_items,
+        "table_mappings": table_mappings,
+        "page_count": len(pages),
+    }
+
+    required_names = ("supplier_name", "invoice_number", "invoice_date", "currency", "grand_total")
+    missing = [name for name in required_names if not merged.get(name)]
+    low_confidence = [
+        name for name in required_names
+        if merged.get(name) and _field_confidence(merged[name]) < 0.70
+    ]
+    merged["validation"] = {
+        "missing_required_fields": missing,
+        "low_confidence_fields": low_confidence,
+        "has_line_items": len(deduped_items) > 0,
+    }
+    merged["requires_review"] = bool(missing or low_confidence)
+    return merged
