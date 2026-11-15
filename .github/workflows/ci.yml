@@ -157,3 +157,31 @@ jobs:
             --min-reconciliation-f1 0.95
       - name: Reconciliation microbenchmarks
         run: go test ./apps/api/internal/reconciliation -run '^$' -bench 'Benchmark(Match|FindAmountCombination)$' -benchtime=100x
+
+
+  storage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23.x"
+      - name: Start MinIO
+        run: |
+          docker run -d --name rpd-minio \
+            -p 9000:9000 \
+            -e MINIO_ROOT_USER=minioadmin \
+            -e MINIO_ROOT_PASSWORD=minioadmin \
+            minio/minio:latest server /data --address :9000
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:9000/minio/health/live >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs rpd-minio
+          exit 1
+      - name: S3-compatible storage integration test
+        env:
+          S3_TEST_ENDPOINT: http://127.0.0.1:9000
+        run: go test ./apps/api/internal/storage -run TestS3Integration -v
