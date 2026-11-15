@@ -13,7 +13,7 @@ import (
 )
 
 type Local struct { Root string }
-type SavedOriginal struct { Path string; SHA256 string; Size int64 }
+type SavedOriginal struct { Path string; StorageURI string; SHA256 string; Size int64 }
 
 func NewLocal(root string) *Local { return &Local{Root: root} }
 
@@ -44,7 +44,7 @@ func (s *Local) SaveOriginal(tenantID, documentID, originalName string, src io.R
     }
     abs, err := filepath.Abs(target)
     if err != nil { return SavedOriginal{}, err }
-    return SavedOriginal{Path: abs, SHA256: digest, Size: n}, nil
+    return SavedOriginal{Path: abs, StorageURI: abs, SHA256: digest, Size: n}, nil
 }
 
 func (s *Local) Ready() error {
