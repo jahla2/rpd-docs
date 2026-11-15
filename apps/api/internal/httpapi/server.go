@@ -84,6 +84,9 @@ func New(st *store.Store, fs *storage.Manager, q *queue.Publisher, defaultTenant
     mux.HandleFunc("POST /api/v1/admin/api-keys/{id}/revoke", s.revokeAPIKey)
     mux.HandleFunc("GET /api/v1/artifacts/{id}/access", s.getArtifactAccess)
     mux.HandleFunc("GET /api/v1/artifacts/{id}/content", s.getArtifactContent)
+    mux.HandleFunc("GET /api/v1/output-profiles", s.listOutputProfiles)
+    mux.HandleFunc("POST /api/v1/output-profiles", s.createOutputProfile)
+    mux.HandleFunc("GET /api/v1/output-profiles/{id}", s.getOutputProfile)
     return requestLog(logger,mux)
 }
 
