@@ -204,3 +204,6 @@ func requestLog(logger *slog.Logger,next http.Handler) http.Handler {
         logger.Info("http_request","method",r.Method,"path",r.URL.Path,"duration_ms",time.Since(start).Milliseconds())
     })
 }
+
+func storeNotFound(err error) bool { return store.IsNotFound(err) }
+func parsePagination(limitValue,offsetValue string)(int,int){ return store.ParsePagination(limitValue,offsetValue) }
