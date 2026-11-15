@@ -81,6 +81,11 @@ func (s *Service) ExecuteQueuedRun(ctx context.Context,tenantID,runID string) er
     cancelled,cancelErr:=s.Store.ReconciliationCancellationRequested(ctx,tenantID,runID)
     if cancelErr!=nil { return cancelErr }
     if cancelled { return s.Store.CancelReconciliationRun(ctx,tenantID,runID) }
+
+    if err:=s.tryManyToOne(ctx,tenantID,runID,state.Run.TargetDatasetID,cfg); err!=nil {
+        return err
+    }
+    if err:=s.Store.RefreshReconciliationProgress(ctx,tenantID,runID); err!=nil { return err }
     return s.Store.CompleteAsyncReconciliationRun(ctx,tenantID,runID)
 }
 
@@ -322,4 +327,112 @@ func (s *Service) tryOneToMany(
             "target_record_ids":combination.IDs,
         })
     return err==nil,err
+}
+
+
+type groupedSourceInvoice struct {
+    DocumentID string
+    Supplier string
+    SupplierKey string
+    Currency string
+    Amount string
+    Date *time.Time
+}
+
+func (s *Service) loadGroupedSource(ctx context.Context,tenantID,documentID string)(groupedSourceInvoice,error){
+    artifact,err:=s.Store.LatestCanonicalArtifact(ctx,tenantID,documentID)
+    if err!=nil { return groupedSourceInvoice{},err }
+    data,err:=os.ReadFile(artifact.StorageURI)
+    if err!=nil { return groupedSourceInvoice{},err }
+    var invoice canonical.Invoice
+    if err:=json.Unmarshal(data,&invoice); err!=nil { return groupedSourceInvoice{},err }
+
+    result:=groupedSourceInvoice{
+        DocumentID:documentID,
+        Supplier:strings.TrimSpace(invoice.SupplierName.Value),
+        Currency:strings.ToUpper(strings.TrimSpace(invoice.Currency.Value)),
+        Amount:strings.TrimSpace(invoice.GrandTotal.Value),
+    }
+    result.SupplierKey=reconciliation.NormalizeReference(result.Supplier)
+    if value:=strings.TrimSpace(invoice.InvoiceDate.Value); value!="" {
+        if parsed,parseErr:=time.Parse("2006-01-02",value); parseErr==nil { result.Date=&parsed }
+    }
+    if result.SupplierKey=="" || result.Amount=="" {
+        return groupedSourceInvoice{},fmt.Errorf("document %s lacks supplier or amount for grouped match",documentID)
+    }
+    return result,nil
+}
+
+func (s *Service) tryManyToOne(
+    ctx context.Context,tenantID,runID,datasetID string,cfg Config,
+) error {
+    unmatched,err:=s.Store.ListUnmatchedRunItems(ctx,tenantID,runID)
+    if err!=nil { return err }
+    if len(unmatched)<2 { return nil }
+
+    groups:=map[string][]groupedSourceInvoice{}
+    for _,item:=range unmatched {
+        source,loadErr:=s.loadGroupedSource(ctx,tenantID,item.DocumentID)
+        if loadErr!=nil { continue }
+        key:=source.SupplierKey+"|"+source.Currency
+        groups[key]=append(groups[key],source)
+    }
+
+    for _,sources:=range groups {
+        if len(sources)<2 { continue }
+        supplierKeys,resolveErr:=s.Store.ResolveSupplierKeys(ctx,tenantID,sources[0].Supplier,cfg.FuzzySupplierThreshold)
+        if resolveErr!=nil { return resolveErr }
+
+        candidates,candidateErr:=s.Store.CandidateERPTargetsForManyToOne(
+            ctx,tenantID,datasetID,sources[0].Supplier,sources[0].Currency,
+            supplierKeys,sources[0].Date,cfg.DateWindowDays,cfg.FuzzySupplierThreshold)
+        if candidateErr!=nil { return candidateErr }
+
+        sourceEntries:=make([]reconciliation.AmountEntry,0,len(sources))
+        byID:=map[string]groupedSourceInvoice{}
+        for _,source:=range sources {
+            sourceEntries=append(sourceEntries,reconciliation.AmountEntry{ID:source.DocumentID,Amount:source.Amount})
+            byID[source.DocumentID]=source
+        }
+
+        used:=map[string]bool{}
+        for _,candidate:=range candidates {
+            available:=make([]reconciliation.AmountEntry,0,len(sourceEntries))
+            for _,entry:=range sourceEntries {
+                if !used[entry.ID] { available=append(available,entry) }
+            }
+            if len(available)<2 { break }
+
+            combination,ok,comboErr:=reconciliation.FindAmountCombination(
+                available,candidate.Amount,cfg.AbsoluteTolerance,cfg.MaxGroupSize)
+            if comboErr!=nil { return comboErr }
+            if !ok { continue }
+
+            members:=make([]store.MatchGroupMember,0,len(combination.IDs))
+            for _,id:=range combination.IDs {
+                source:=byID[id]
+                members=append(members,store.MatchGroupMember{ID:id,Amount:source.Amount})
+            }
+            score:=90
+            if combination.Difference=="0.0000" { score=95 }
+            if candidate.SupplierSimilarity>=0.90 { score+=5 }
+            if score>100 { score=100 }
+
+            if err:=s.Store.SaveManyToOneMatchGroup(
+                ctx,tenantID,runID,candidate.ID,members,combination.Total,candidate.Amount,
+                combination.Difference,score,map[string]any{
+                    "rule":"many_invoices_to_one_erp_record",
+                    "supplier_similarity":candidate.SupplierSimilarity,
+                    "source_document_ids":combination.IDs,
+                }); err!=nil { return err }
+
+            for _,id:=range combination.IDs { used[id]=true }
+            _=s.Store.AddReconciliationEvent(ctx,tenantID,runID,"group.matched","RUNNING",0,nil,map[string]any{
+                "group_type":"MANY_TO_ONE",
+                "source_document_ids":combination.IDs,
+                "target_record_id":candidate.ID,
+            })
+        }
+    }
+    return nil
 }

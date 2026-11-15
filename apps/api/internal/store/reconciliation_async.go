@@ -180,8 +180,8 @@ func (s *Store) RefreshReconciliationProgress(ctx context.Context,tenantID,runID
       WITH counts AS (
         SELECT
           count(*)::int AS total,
-          count(*) FILTER (WHERE status IN ('MATCHED','SUGGESTED','EXCEPTION','FAILED','CANCELLED'))::int AS processed,
-          count(*) FILTER (WHERE status='MATCHED')::int AS matched,
+          count(*) FILTER (WHERE status IN ('MATCHED','MATCHED_GROUP','SUGGESTED','EXCEPTION','FAILED','CANCELLED'))::int AS processed,
+          count(*) FILTER (WHERE status IN ('MATCHED','MATCHED_GROUP'))::int AS matched,
           count(*) FILTER (WHERE status='SUGGESTED')::int AS suggested,
           count(*) FILTER (WHERE status IN ('EXCEPTION','FAILED'))::int AS exceptions
         FROM reconciliation_run_items
