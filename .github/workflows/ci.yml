@@ -43,4 +43,11 @@ jobs:
           mkdir -p /tmp/rpd-native-out
           ./build/native-engine/rpd-native-engine preprocess /tmp/rpd-test.pgm /tmp/rpd-native-out
           test -f /tmp/rpd-native-out/page-001.png
-          test -f /tmp/rpd-native-out/quality.json
+          test -f /tmp/rpd-native-out/page-001-quality.json
+          rm -rf /tmp/rpd-native-prepare
+          mkdir -p /tmp/rpd-native-prepare
+          ./build/native-engine/rpd-native-engine prepare /tmp/rpd-test.pgm /tmp/rpd-native-prepare > /tmp/rpd-prepare.json
+          grep -q '"schema_version":"2.0"' /tmp/rpd-prepare.json
+          grep -q '"page_count":1' /tmp/rpd-prepare.json
+          test -f /tmp/rpd-native-prepare/page-001.png
+          test -f /tmp/rpd-native-prepare/page-001-quality.json
