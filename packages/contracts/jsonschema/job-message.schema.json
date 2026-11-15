@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rpd.local/contracts/job-message.schema.json",
+  "title": "RPD Job Message",
+  "type": "object",
+  "required": ["schema_version", "job_id", "tenant_id", "document_id", "run_id", "step", "input_artifact"],
+  "properties": {
+    "schema_version": {"type": "string", "const": "1.0"},
+    "job_id": {"type": "string"},
+    "tenant_id": {"type": "string"},
+    "document_id": {"type": "string"},
+    "run_id": {"type": "string"},
+    "step": {"type": "string"},
+    "input_artifact": {"type": "string"},
+    "options": {"type": "object", "additionalProperties": true}
+  },
+  "additionalProperties": false
+}

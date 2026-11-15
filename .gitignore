@@ -1,0 +1,13 @@
+.env
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+bin/
+build/
+cmake-build-*/
+storage/
+coverage.out
+.DS_Store
+.idea/
+.vscode/
