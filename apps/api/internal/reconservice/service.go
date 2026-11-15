@@ -15,9 +15,11 @@ import (
 )
 
 type Config struct {
-    AbsoluteTolerance string
-    DateWindowDays int
-    AutoAcceptComposite bool
+    AbsoluteTolerance string `json:"absolute_tolerance"`
+    DateWindowDays int `json:"date_window_days"`
+    AutoAcceptComposite bool `json:"auto_accept_composite"`
+    FuzzySupplierThreshold float64 `json:"fuzzy_supplier_threshold"`
+    MaxGroupSize int `json:"max_group_size"`
 }
 
 type Summary struct {
@@ -34,6 +36,53 @@ type Service struct {
 }
 
 func New(st *store.Store)*Service { return &Service{Store:st} }
+
+func (s *Service) ExecuteQueuedRun(ctx context.Context,tenantID,runID string) error {
+    state,err:=s.Store.GetReconciliationRunState(ctx,tenantID,runID)
+    if err!=nil { return err }
+
+    var cfg Config
+    if err:=json.Unmarshal(state.Config,&cfg); err!=nil { return fmt.Errorf("decode reconciliation config: %w",err) }
+    if cfg.AbsoluteTolerance=="" { cfg.AbsoluteTolerance="0.01" }
+    if cfg.DateWindowDays<=0 { cfg.DateWindowDays=3 }
+    if cfg.FuzzySupplierThreshold<=0 { cfg.FuzzySupplierThreshold=0.72 }
+    if cfg.MaxGroupSize<=0 { cfg.MaxGroupSize=4 }
+
+    if err:=s.Store.StartReconciliationRun(ctx,tenantID,runID); err!=nil { return err }
+    items,err:=s.Store.PendingReconciliationItems(ctx,tenantID,runID)
+    if err!=nil { return err }
+
+    for _,item:=range items {
+        cancelled,cancelErr:=s.Store.ReconciliationCancellationRequested(ctx,tenantID,runID)
+        if cancelErr!=nil { return cancelErr }
+        if cancelled { return s.Store.CancelReconciliationRun(ctx,tenantID,runID) }
+
+        if err:=s.Store.MarkReconciliationItemRunning(ctx,tenantID,runID,item.DocumentID); err!=nil { return err }
+        _=s.Store.AddReconciliationEvent(ctx,tenantID,runID,"document.started","RUNNING",state.Progress,&item.DocumentID,nil)
+
+        outcome,processErr:=s.reconcileDocument(ctx,tenantID,runID,state.Run.TargetDatasetID,item.DocumentID,cfg)
+        if processErr!=nil {
+            _=s.Store.SaveException(ctx,tenantID,runID,item.DocumentID,
+                "PROCESSING_ERROR","ERROR",processErr.Error(),map[string]any{"document_id":item.DocumentID})
+        }
+        if err:=s.Store.CompleteReconciliationItem(ctx,tenantID,runID,item.DocumentID,outcome,processErr); err!=nil { return err }
+
+        updated,updateErr:=s.Store.GetReconciliationRunState(ctx,tenantID,runID)
+        if updateErr==nil {
+            eventStatus:="document.completed"
+            if processErr!=nil { eventStatus="document.failed" }
+            _=s.Store.AddReconciliationEvent(ctx,tenantID,runID,eventStatus,"RUNNING",updated.Progress,&item.DocumentID,map[string]any{
+                "outcome":outcome,
+            })
+            state=updated
+        }
+    }
+
+    cancelled,cancelErr:=s.Store.ReconciliationCancellationRequested(ctx,tenantID,runID)
+    if cancelErr!=nil { return cancelErr }
+    if cancelled { return s.Store.CancelReconciliationRun(ctx,tenantID,runID) }
+    return s.Store.CompleteAsyncReconciliationRun(ctx,tenantID,runID)
+}
 
 func (s *Service) Run(
     ctx context.Context,
