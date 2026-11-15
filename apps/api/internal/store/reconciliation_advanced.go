@@ -20,7 +20,7 @@ type MatchGroupMember struct {
 
 func (s *Store) CandidateERPRecordsAdvanced(
     ctx context.Context,
-    tenantID,datasetID,normalizedReference,sourceSupplier,currency,amount string,
+    tenantID,runID,datasetID,normalizedReference,sourceSupplier,currency,amount string,
     supplierKeys []string,
     recordDate *time.Time,
     tolerance string,
@@ -58,6 +58,18 @@ func (s *Store) CandidateERPRecordsAdvanced(
             )
           )
         )
+        AND NOT EXISTS (
+          SELECT 1 FROM matches m
+          WHERE m.tenant_id=$1 AND m.reconciliation_run_id=$12
+            AND m.target_record_id=erp_records.id AND m.status<>'REJECTED'
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM reconciliation_match_group_members gm
+          JOIN reconciliation_match_groups g ON g.id=gm.group_id
+          WHERE gm.tenant_id=$1 AND g.reconciliation_run_id=$12
+            AND gm.side='TARGET' AND gm.target_record_id=erp_records.id
+        )
       ORDER BY
         CASE WHEN normalized_reference=$3 THEN 0 ELSE 1 END,
         CASE WHEN normalized_supplier=ANY($4::text[]) THEN 0 ELSE 1 END,
@@ -65,7 +77,7 @@ func (s *Store) CandidateERPRecordsAdvanced(
         record_date NULLS LAST
       LIMIT 75
     `,tenantID,datasetID,normalizedReference,supplierKeys,currency,amount,dateArg,tolerance,
-      dateWindowDays,sourceSupplier,fuzzyThreshold)
+      dateWindowDays,sourceSupplier,fuzzyThreshold,runID)
     if err!=nil { return nil,err }
     defer rows.Close()
 
@@ -83,7 +95,7 @@ func (s *Store) CandidateERPRecordsAdvanced(
 
 func (s *Store) CandidateERPGroupRecords(
     ctx context.Context,
-    tenantID,datasetID,sourceSupplier,currency,targetAmount string,
+    tenantID,runID,datasetID,sourceSupplier,currency,targetAmount string,
     supplierKeys []string,
     recordDate *time.Time,
     tolerance string,
@@ -117,12 +129,24 @@ func (s *Store) CandidateERPGroupRecords(
           normalized_supplier=ANY($3::text[])
           OR similarity(COALESCE(supplier_name,''),$9) >= $10
         )
+        AND NOT EXISTS (
+          SELECT 1 FROM matches m
+          WHERE m.tenant_id=$1 AND m.reconciliation_run_id=$11
+            AND m.target_record_id=erp_records.id AND m.status<>'REJECTED'
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM reconciliation_match_group_members gm
+          JOIN reconciliation_match_groups g ON g.id=gm.group_id
+          WHERE gm.tenant_id=$1 AND g.reconciliation_run_id=$11
+            AND gm.side='TARGET' AND gm.target_record_id=erp_records.id
+        )
       ORDER BY
         CASE WHEN normalized_supplier=ANY($3::text[]) THEN 0 ELSE 1 END,
         amount DESC,record_date NULLS LAST
       LIMIT 30
     `,tenantID,datasetID,supplierKeys,currency,targetAmount,dateArg,tolerance,dateWindowDays,
-      sourceSupplier,fuzzyThreshold)
+      sourceSupplier,fuzzyThreshold,runID)
     if err!=nil { return nil,err }
     defer rows.Close()
     out:=make([]AdvancedCandidateRecord,0)

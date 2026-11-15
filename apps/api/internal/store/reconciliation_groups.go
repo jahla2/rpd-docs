@@ -38,7 +38,7 @@ func (s *Store) ListUnmatchedRunItems(ctx context.Context,tenantID,runID string)
 
 func (s *Store) CandidateERPTargetsForManyToOne(
     ctx context.Context,
-    tenantID,datasetID,sourceSupplier,currency string,
+    tenantID,runID,datasetID,sourceSupplier,currency string,
     supplierKeys []string,
     recordDate *time.Time,
     dateWindowDays int,
@@ -72,19 +72,21 @@ func (s *Store) CandidateERPTargetsForManyToOne(
         )
         AND NOT EXISTS (
           SELECT 1 FROM matches m
-          WHERE m.tenant_id=$1
-            AND m.reconciliation_run_id IN (
-              SELECT id FROM reconciliation_runs
-              WHERE tenant_id=$1 AND target_dataset_id=$2
-            )
-            AND m.target_record_id=erp_records.id
-            AND m.status NOT IN ('REJECTED')
+          WHERE m.tenant_id=$1 AND m.reconciliation_run_id=$9
+            AND m.target_record_id=erp_records.id AND m.status<>'REJECTED'
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM reconciliation_match_group_members gm
+          JOIN reconciliation_match_groups g ON g.id=gm.group_id
+          WHERE gm.tenant_id=$1 AND g.reconciliation_run_id=$9
+            AND gm.side='TARGET' AND gm.target_record_id=erp_records.id
         )
       ORDER BY
         CASE WHEN normalized_supplier=ANY($3::text[]) THEN 0 ELSE 1 END,
         record_date NULLS LAST,amount DESC
       LIMIT 75
-    `,tenantID,datasetID,supplierKeys,currency,dateArg,dateWindowDays,sourceSupplier,fuzzyThreshold)
+    `,tenantID,datasetID,supplierKeys,currency,dateArg,dateWindowDays,sourceSupplier,fuzzyThreshold,runID)
     if err!=nil { return nil,err }
     defer rows.Close()
 

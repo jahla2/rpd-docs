@@ -179,7 +179,7 @@ func (s *Service) reconcileDocument(
     if err!=nil { return "",err }
 
     candidates,err:=s.Store.CandidateERPRecordsAdvanced(
-        ctx,tenantID,datasetID,
+        ctx,tenantID,runID,datasetID,
         reconciliation.NormalizeReference(reference),
         supplier,
         currency,
@@ -290,7 +290,7 @@ func (s *Service) tryOneToMany(
     cfg Config,
 )(bool,error){
     candidates,err:=s.Store.CandidateERPGroupRecords(
-        ctx,tenantID,datasetID,supplier,currency,amount,supplierKeys,invoiceDate,
+        ctx,tenantID,runID,datasetID,supplier,currency,amount,supplierKeys,invoiceDate,
         cfg.AbsoluteTolerance,cfg.DateWindowDays,cfg.FuzzySupplierThreshold)
     if err!=nil { return false,err }
     if len(candidates)<2 { return false,nil }
@@ -384,7 +384,7 @@ func (s *Service) tryManyToOne(
         if resolveErr!=nil { return resolveErr }
 
         candidates,candidateErr:=s.Store.CandidateERPTargetsForManyToOne(
-            ctx,tenantID,datasetID,sources[0].Supplier,sources[0].Currency,
+            ctx,tenantID,runID,datasetID,sources[0].Supplier,sources[0].Currency,
             supplierKeys,sources[0].Date,cfg.DateWindowDays,cfg.FuzzySupplierThreshold)
         if candidateErr!=nil { return candidateErr }
 
