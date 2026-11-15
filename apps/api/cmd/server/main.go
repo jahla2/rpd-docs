@@ -27,7 +27,13 @@ func main() {
     if err != nil { logger.Error("nats startup failed","error",err); os.Exit(1) }
     defer q.Close()
 
-    handler:=httpapi.New(st,storage.NewLocal(cfg.StorageRoot),q,cfg.DefaultTenantID,cfg.APIKeyPepper,logger)
+    storageManager,err:=storage.NewManager(storage.Config{
+        Backend:cfg.StorageBackend,Root:cfg.StorageRoot,Endpoint:cfg.S3Endpoint,Region:cfg.S3Region,
+        Bucket:cfg.S3Bucket,AccessKey:cfg.S3AccessKey,SecretKey:cfg.S3SecretKey,CreateBucket:cfg.S3CreateBucket,
+    })
+    if err!=nil { logger.Error("storage startup failed","error",err); os.Exit(1) }
+    if err:=storageManager.Ready(); err!=nil { logger.Error("storage readiness failed","error",err); os.Exit(1) }
+    handler:=httpapi.New(st,storageManager,q,cfg.DefaultTenantID,cfg.APIKeyPepper,logger)
     handler=auth.Middleware{Store:st,Mode:cfg.AuthMode,Pepper:cfg.APIKeyPepper,Logger:logger}.Wrap(handler)
     srv:=&http.Server{
         Addr:cfg.HTTPAddr,

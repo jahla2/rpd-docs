@@ -8,7 +8,6 @@ import (
     "log/slog"
     "mime/multipart"
     "net/http"
-    "os"
     "path/filepath"
     "strings"
     "time"
@@ -24,7 +23,7 @@ const maxUploadBytes = 50 << 20
 
 type Server struct {
     store *store.Store
-    storage *storage.Local
+    storage *storage.Manager
     queue *queue.Publisher
     defaultTenantID string
     logger *slog.Logger
@@ -37,7 +36,7 @@ type MappingPreviewRequest struct {
     Samples map[string][]string `json:"samples,omitempty"`
 }
 
-func New(st *store.Store, fs *storage.Local, q *queue.Publisher, defaultTenantID,apiKeyPepper string, logger *slog.Logger) http.Handler {
+func New(st *store.Store, fs *storage.Manager, q *queue.Publisher, defaultTenantID,apiKeyPepper string, logger *slog.Logger) http.Handler {
     s := &Server{
         store:st,storage:fs,queue:q,defaultTenantID:defaultTenantID,logger:logger,
         invoiceMappings:mapping.DefaultInvoiceRegistry(),apiKeyPepper:apiKeyPepper,
@@ -83,6 +82,8 @@ func New(st *store.Store, fs *storage.Local, q *queue.Publisher, defaultTenantID
     mux.HandleFunc("GET /api/v1/admin/api-keys", s.listAPIKeys)
     mux.HandleFunc("POST /api/v1/admin/api-keys", s.createAPIKey)
     mux.HandleFunc("POST /api/v1/admin/api-keys/{id}/revoke", s.revokeAPIKey)
+    mux.HandleFunc("GET /api/v1/artifacts/{id}/access", s.getArtifactAccess)
+    mux.HandleFunc("GET /api/v1/artifacts/{id}/content", s.getArtifactContent)
     return requestLog(logger,mux)
 }
 
@@ -145,11 +146,12 @@ func (s *Server) upload(w http.ResponseWriter,r *http.Request) {
     }
     if err := s.store.CreateDocumentAndJob(r.Context(),store.CreateDocumentParams{
         DocumentID:documentID,TenantID:tenantID,OriginalName:filepath.Base(header.Filename),
-        MimeType:mimeType,SHA256:saved.SHA256,StorageURI:saved.Path,JobID:jobID,RunID:runID,
+        MimeType:mimeType,SHA256:saved.SHA256,StorageURI:saved.StorageURI,JobID:jobID,RunID:runID,
     }); err != nil {
         s.logger.Error("create document","error",err,"document_id",documentID)
         writeError(w,http.StatusInternalServerError,"DATABASE_FAILED","failed to create document"); return
     }
+    if saved.StorageURI!=saved.Path { options["source_uri"]=saved.StorageURI }
     msg := queue.JobMessage{
         SchemaVersion:"1.0",JobID:jobID,TenantID:tenantID,DocumentID:documentID,
         RunID:runID,Step:"PREPROCESS",InputArtifact:saved.Path,Options:options,
@@ -180,7 +182,7 @@ func (s *Server) getDocumentResult(w http.ResponseWriter,r *http.Request) {
         writeError(w,http.StatusInternalServerError,"DATABASE_FAILED","failed to locate canonical result"); return
     }
 
-    data,err:=os.ReadFile(artifact.StorageURI)
+    data,err:=s.storage.Read(artifact.StorageURI)
     if err!=nil {
         s.logger.Error("read canonical result","error",err,"artifact_id",artifact.ID)
         writeError(w,http.StatusInternalServerError,"STORAGE_FAILED","canonical artifact could not be read"); return

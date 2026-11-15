@@ -42,7 +42,7 @@ func (s *Server) correctDocument(w http.ResponseWriter,r *http.Request){
     if storeNotFound(err) { writeError(w,http.StatusNotFound,"NOT_FOUND","canonical document not found"); return }
     if err!=nil { writeError(w,http.StatusInternalServerError,"DATABASE_FAILED","failed to locate canonical document"); return }
 
-    before,err:=os.ReadFile(artifact.StorageURI)
+    before,err:=s.storage.Read(artifact.StorageURI)
     if err!=nil { writeError(w,http.StatusInternalServerError,"STORAGE_FAILED","failed to read canonical document"); return }
 
     latest,err:=s.store.LatestDocumentVersionInfo(r.Context(),tenantID,documentID)
