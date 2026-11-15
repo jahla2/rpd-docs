@@ -48,6 +48,8 @@ func New(st *store.Store, fs *storage.Local, q *queue.Publisher, defaultTenantID
     mux.HandleFunc("GET /api/v1/documents/{id}/result", s.getDocumentResult)
     mux.HandleFunc("GET /api/v1/documents/{id}/artifacts", s.getDocumentArtifacts)
     mux.HandleFunc("GET /api/v1/jobs/{id}", s.getJob)
+    mux.HandleFunc("GET /api/v1/jobs/{id}/pages", s.listJobPages)
+    mux.HandleFunc("GET /api/v1/jobs/{id}/events", s.streamJobEvents)
     mux.HandleFunc("POST /api/v1/mapping-templates/preview", s.previewMapping)
     mux.HandleFunc("GET /api/v1/mapping-templates", s.listMappingTemplates)
     mux.HandleFunc("POST /api/v1/mapping-templates", s.createMappingTemplate)

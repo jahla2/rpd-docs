@@ -77,6 +77,13 @@ func (s *Store) CreateDocumentAndJob(ctx context.Context, p CreateDocumentParams
     `, p.JobID,p.TenantID,p.DocumentID,p.RunID)
     if err != nil { return err }
     _, err = tx.Exec(ctx, `
+        INSERT INTO job_events
+          (tenant_id,job_id,document_id,event_type,status,progress,data_json)
+        VALUES ($1,$2,$3,'document.received','QUEUED',0,'{}'::jsonb)
+    `, p.TenantID,p.JobID,p.DocumentID)
+    if err != nil { return err }
+
+    _, err = tx.Exec(ctx, `
         INSERT INTO artifacts
           (tenant_id,document_id,run_id,artifact_type,storage_uri,content_type,sha256)
         VALUES ($1,$2,$3,'ORIGINAL',$4,$5,$6)

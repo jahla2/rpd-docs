@@ -5,11 +5,11 @@
 #include <cmath>
 #include <cstdlib>
 #include <fstream>
-#include <iomanip>
+#include <iomanip>\n#include <iterator>
 #include <sstream>
 #include <stdexcept>
 #include <string>
-#include <vector>
+#include <vector>\n#include <utility>
 
 #ifdef RPD_WITH_OPENCV
 #include <opencv2/core.hpp>
