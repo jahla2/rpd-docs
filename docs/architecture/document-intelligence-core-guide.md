@@ -1,11 +1,11 @@
 # Document Intelligence Core — Implementation Guide
 
-**Version:** 1.0  
+**Version:** 2.0  
 **Languages:** Go, C++, Python  
 **Database:** PostgreSQL  
 **OCR:** RapidOCR  
 **Table Recognition:** RapidTable / lightweight Paddle SLANet  
-**Status:** Source of truth for the MVP
+**Status:** Source of truth for the implemented MVP core
 
 ## 1. Goal
 
@@ -219,22 +219,17 @@ Modules:
 - **Mapping Validator** — required fields, duplicate targets, type compatibility.
 - **Output Schema Builder** — selected output fields and ordering.
 
-Supported transforms:
+Implemented transforms:
 
 ```text
-rename
 normalize
-date conversion
-decimal conversion
-split
-combine
-compute
-lookup
+date
+decimal
 default
 exclude
 ```
 
-Never execute arbitrary user scripts. Mapping operations come from an allowlisted transform registry.
+Unsupported transforms are rejected rather than ignored. Future transforms such as split/combine/compute/lookup require an explicit runtime implementation and tests before being added to the allowlist. Never execute arbitrary user scripts.
 
 Example template:
 
@@ -435,16 +430,34 @@ Every tenant-owned table is tenant-scoped. Index candidate fields before fuzzy p
 ### Reconciliation
 - `POST /api/v1/reconciliation-runs`
 - `GET /api/v1/reconciliation-runs/{id}`
+- `POST /api/v1/reconciliation-runs/{id}/cancel`
+- `GET /api/v1/reconciliation-runs/{id}/events` (SSE)
 - `GET /api/v1/reconciliation-runs/{id}/matches`
 - `GET /api/v1/reconciliation-runs/{id}/exceptions`
 - `POST /api/v1/reconciliation-runs/{id}/matches/{matchId}/approve`
 - `POST /api/v1/reconciliation-runs/{id}/matches/{matchId}/reject`
+- `POST /api/v1/reconciliation-runs/{id}/export`
 
-### Review / export
+### Review / corrections / export
 - `GET /api/v1/review-tasks`
+- `GET /api/v1/review-tasks/{id}`
 - `POST /api/v1/review-tasks/{id}/resolve`
-- `POST /api/v1/exports`
+- `POST /api/v1/documents/{id}/corrections`
+- `GET/POST /api/v1/output-profiles`
+- `GET /api/v1/output-profiles/{id}`
 - `GET /api/v1/exports/{id}`
+- `GET /api/v1/exports/{id}/download`
+
+### Suppliers
+- `GET /api/v1/suppliers`
+- `POST /api/v1/suppliers`
+- `POST /api/v1/suppliers/{id}/aliases`
+
+### Artifacts / security
+- `GET /api/v1/artifacts/{id}/access`
+- `GET /api/v1/artifacts/{id}/content`
+- `GET/POST /api/v1/admin/api-keys`
+- `POST /api/v1/admin/api-keys/{id}/revoke`
 
 ### Health
 - `GET /health/live`
@@ -458,91 +471,131 @@ Non-goals for MVP: Kubernetes, dozens of microservices, fully autonomous financi
 
 ## 16. Implementation checklist
 
-### Phase 0 — repo
+### Phase 0 — repository and CI
 - [x] monorepo
 - [x] Go workspace
 - [x] Python project
 - [x] CMake project
-- [x] env example
-- [x] Docker Compose dependencies
+- [x] environment template
+- [x] Docker/local dependency foundation
 - [x] architecture guide
-- [x] versioned JSON contracts
-- [ ] CI green on implementation branch
+- [x] versioned contracts
+- [x] Go/Python/C++/PostgreSQL CI
+- [x] synthetic quality gate and Go reconciliation microbenchmarks
+- [x] S3-compatible integration test
+- [ ] private production-quality benchmark corpus
 
-### Phase 1 — foundation
-- [x] PostgreSQL core migration
-- [x] tenant/document/job/artifact core tables
-- [x] storage layout abstraction
-- [x] queue contract
-- [x] structured service configuration
-- [x] liveness/readiness endpoints
-- [ ] production auth/API keys
-- [ ] object storage adapter
+### Phase 1 — platform foundation
+- [x] PostgreSQL migrations
+- [x] tenant/document/job/artifact tables
+- [x] durable NATS contracts
+- [x] liveness/readiness
+- [x] API-key authentication
+- [x] ADMIN/OPERATOR/REVIEWER/READER RBAC
+- [x] tenant identity derived from authenticated API key when auth is enabled
+- [x] per-key rate limiting
+- [x] bootstrap key CLI
+- [x] local storage backend
+- [x] S3-compatible storage backend
+- [x] signed S3 artifact access
+- [ ] end-user/JWT login flow if a first-party web UI requires interactive users
+- [ ] production secret manager / key rotation automation
 
-### Phase 2 — intake/native
-- [x] upload endpoint skeleton
-- [x] SHA-256 and immutable storage path
+### Phase 2 — document intake and native processing
+- [x] upload API
+- [x] SHA-256 immutable intake
 - [x] document/job creation
-- [x] publish preprocess job
-- [x] native-engine contract/CLI
-- [ ] full PDF rasterization
-- [ ] OpenCV deskew/denoise/quality implementation
+- [x] multi-page PDF page discovery
+- [x] Poppler PDF rasterization
+- [x] searchable-PDF embedded-text fast path
+- [x] mixed searchable/scanned page routing
+- [x] OpenCV deskew/denoise/CLAHE/resize/quality scoring
+- [x] blank-page routing
+- [x] S3 rematerialization on worker hosts
 
-### Phase 3 — OCR/table
-- [x] Python service shell
+### Phase 3 — OCR and tables
 - [x] RapidOCR adapter
-- [x] normalized OCR contract
-- [x] RapidTable/SLANet adapter shell
-- [ ] production OCR fixtures and accuracy benchmarks
-- [ ] table-region detector
+- [x] normalized OCR blocks
+- [x] Poppler bbox-layout normalization
+- [x] OCR-guided table-region detection
+- [x] RapidTable/SLANet+ adapter
+- [x] reuse existing OCR/text boxes for table recognition
+- [x] multi-page extraction merge
+- [ ] private OCR/table accuracy fixtures representing production suppliers
 
-### Phase 4 — mapping/canonical
-- [x] deterministic header normalization
-- [x] invoice alias registry
-- [x] data-type inferencer
-- [x] mapping preview API
-- [x] canonical invoice extractor
-- [x] OCR-guided table-region detector
-- [x] deterministic line-item header mapping
-- [ ] persisted mapping-template CRUD/version activation
-- [ ] richer column profile statistics
-- [ ] complete financial subtotal/tax validation rules
+### Phase 4 — mapping, canonicalization and validation
+- [x] header normalization
+- [x] alias registry
+- [x] data-type inference
+- [x] mapping preview
+- [x] persisted mapping-template CRUD
+- [x] template versioning and activation
+- [x] exact template version persisted on document version
+- [x] runtime mapping aliases for document fields and table columns
+- [x] allowlisted transforms
+- [x] canonical invoice extraction
+- [x] line-item extraction
+- [x] required-field validation
+- [x] quantity × unit-price validation
+- [x] line-sum/subtotal validation
+- [x] subtotal/tax/grand-total validation
+- [x] validation evidence artifact
+- [ ] richer configurable column profiling statistics
 
-### Phase 5 — ERP/reconciliation
-- [x] dataset creation/query APIs
-- [x] CSV parser
-- [x] XLSX parser
-- [x] automatic ERP header detection/mapping
-- [x] optional header mapping overrides
-- [x] ERP canonicalization
-- [x] decimal-safe amount normalization
-- [x] row validation
-- [x] dataset-local duplicate row detection
-- [x] indexed candidate generator
-- [x] exact match
-- [x] composite scoring
-- [x] amount tolerance
-- [x] date window
-- [x] ambiguous/equal-score duplicate detection
-- [x] persisted match evidence
-- [x] reconciliation exceptions
-- [x] reviewer approve/reject endpoints
-- [x] review-task resolution with audit event
-- [ ] fuzzy supplier similarity beyond normalized exact matching
-- [ ] async reconciliation for large batches
-- [ ] persisted original ERP import artifact/provenance
+### Phase 5 — ERP and reconciliation
+- [x] dataset APIs
+- [x] CSV import
+- [x] XLSX import
+- [x] ERP header mapping and overrides
+- [x] decimal-safe canonicalization
+- [x] duplicate ERP row hashing
+- [x] indexed candidate generation
+- [x] exact/tolerance/composite matching
+- [x] fuzzy supplier/master-data resolution
+- [x] supplier aliases
+- [x] one invoice → many ERP rows
+- [x] many invoices → one ERP row
+- [x] same-run ERP target exclusivity
+- [x] ambiguous/equal-score review routing
+- [x] async queued reconciliation worker
+- [x] run progress/events/cancellation
+- [x] grouped-match persistence and export visibility
+- [ ] persisted original ERP import file/provenance artifact
+- [ ] PO/GRN/invoice three-way matching (post-MVP)
 
-### Phase 6 — export/AI
-- [x] JSON reconciliation export
-- [x] CSV reconciliation export
-- [x] XLSX reconciliation export
-- [x] persisted export metadata/download endpoint
-- [x] basic review workflow
-- [ ] configurable output profiles
-- [ ] configurable output column order
-- [ ] selective agent fallback
-- [ ] structured agent evidence
-- [ ] full field/line-item correction workflow
+### Phase 6 — review, agentic fallback and export
+- [x] review task APIs
+- [x] approve/reject reconciliation matches
+- [x] audited field corrections
+- [x] audited line-item replacement
+- [x] immutable corrected document versions
+- [x] deterministic revalidation after correction
+- [x] selective agentic fallback
+- [x] Ollama agent provider
+- [x] OpenAI-compatible agent provider
+- [x] strict agent field allowlist
+- [x] agent evidence/model/prompt tracking
+- [x] deterministic validation after every agent proposal
+- [x] JSON/CSV/XLSX reconciliation exports
+- [x] configurable output profiles
+- [x] configurable output column order/header aliases
+- [x] local or S3-backed export download
+
+### Phase 7 — quality and production hardening
+- [x] durable SSE document events
+- [x] durable SSE reconciliation events
+- [x] resumable SSE with Last-Event-ID
+- [x] synthetic golden field/line/reconciliation metric evaluator
+- [x] reconciliation precision/recall/F1 calculation
+- [x] p50/p95 deployed-API latency benchmark harness
+- [x] Go reconciliation microbenchmarks
+- [x] full migration-chain CI
+- [x] real two-page searchable-PDF native smoke test
+- [x] S3-compatible upload/read/presign integration test
+- [ ] private representative invoice/ERP benchmark corpus
+- [ ] sustained concurrency/load test in a production-like environment
+- [ ] backup/restore and retention-policy validation
+- [ ] external security review / penetration testing before public exposure
 
 ## 17. Development order
 
