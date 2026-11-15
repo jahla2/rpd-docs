@@ -5,7 +5,6 @@ import (
     "net/http"
     "os"
     "path/filepath"
-    "strings"
 
     "github.com/jahla2/rpd-docs/apps/api/internal/correction"
     "github.com/jahla2/rpd-docs/apps/api/internal/store"

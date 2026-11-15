@@ -44,7 +44,7 @@ func GenerateAPIKey()(token,prefix string,err error){
 
 func ParseAPIKey(token string)(string,error){
     token=strings.TrimSpace(token)
-    parts:=strings.Split(token,"_")
+    parts:=strings.SplitN(token,"_",3)
     if len(parts)!=3 || parts[0]!="rpd" || len(parts[1])<8 || len(parts[2])<20 {
         return "",fmt.Errorf("invalid API key format")
     }

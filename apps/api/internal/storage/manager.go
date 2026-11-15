@@ -102,6 +102,7 @@ func (m *Manager) SaveOriginal(tenantID,documentID,originalName string,src io.Re
 
 func (m *Manager) Read(uri string)([]byte,error){
     if !strings.HasPrefix(uri,"s3://") { return os.ReadFile(uri) }
+    if m.s3==nil { return nil,fmt.Errorf("S3 storage is not configured") }
     bucket,key,err:=parseS3URI(uri)
     if err!=nil { return nil,err }
     ctx,cancel:=context.WithTimeout(context.Background(),2*time.Minute)
@@ -114,6 +115,7 @@ func (m *Manager) Read(uri string)([]byte,error){
 
 func (m *Manager) PresignGet(uri string,expires time.Duration)(string,error){
     if !strings.HasPrefix(uri,"s3://") { return "",fmt.Errorf("artifact is not stored in S3") }
+    if m.s3==nil { return "",fmt.Errorf("S3 storage is not configured") }
     bucket,key,err:=parseS3URI(uri)
     if err!=nil { return "",err }
     if expires<=0 { expires=15*time.Minute }
