@@ -31,8 +31,7 @@ func (s *Server) resolveReviewTask(w http.ResponseWriter,r *http.Request){
     }
     if req.Resolution==nil { req.Resolution=map[string]any{} }
 
-    actor:=strings.TrimSpace(r.Header.Get("X-Actor-ID"))
-    if actor=="" { actor="api-user" }
+    actor:=actorFrom(r)
 
     if err:=s.store.ResolveReviewTask(r.Context(),tenantFrom(r,s.defaultTenantID),r.PathValue("id"),actor,req.Resolution); err!=nil {
         writeError(w,http.StatusBadRequest,"REVIEW_RESOLUTION_FAILED",err.Error()); return

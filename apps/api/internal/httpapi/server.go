@@ -13,6 +13,7 @@ import (
     "strings"
     "time"
 
+    "github.com/jahla2/rpd-docs/apps/api/internal/auth"
     "github.com/jahla2/rpd-docs/apps/api/internal/mapping"
     "github.com/jahla2/rpd-docs/apps/api/internal/queue"
     "github.com/jahla2/rpd-docs/apps/api/internal/storage"
@@ -28,6 +29,7 @@ type Server struct {
     defaultTenantID string
     logger *slog.Logger
     invoiceMappings *mapping.Registry
+    apiKeyPepper string
 }
 
 type MappingPreviewRequest struct {
@@ -35,10 +37,10 @@ type MappingPreviewRequest struct {
     Samples map[string][]string `json:"samples,omitempty"`
 }
 
-func New(st *store.Store, fs *storage.Local, q *queue.Publisher, defaultTenantID string, logger *slog.Logger) http.Handler {
+func New(st *store.Store, fs *storage.Local, q *queue.Publisher, defaultTenantID,apiKeyPepper string, logger *slog.Logger) http.Handler {
     s := &Server{
         store:st,storage:fs,queue:q,defaultTenantID:defaultTenantID,logger:logger,
-        invoiceMappings:mapping.DefaultInvoiceRegistry(),
+        invoiceMappings:mapping.DefaultInvoiceRegistry(),apiKeyPepper:apiKeyPepper,
     }
     mux := http.NewServeMux()
     mux.HandleFunc("GET /health/live", s.live)
@@ -78,6 +80,9 @@ func New(st *store.Store, fs *storage.Local, q *queue.Publisher, defaultTenantID
     mux.HandleFunc("GET /api/v1/suppliers", s.searchSuppliers)
     mux.HandleFunc("POST /api/v1/suppliers", s.createSupplier)
     mux.HandleFunc("POST /api/v1/suppliers/{id}/aliases", s.addSupplierAlias)
+    mux.HandleFunc("GET /api/v1/admin/api-keys", s.listAPIKeys)
+    mux.HandleFunc("POST /api/v1/admin/api-keys", s.createAPIKey)
+    mux.HandleFunc("POST /api/v1/admin/api-keys/{id}/revoke", s.revokeAPIKey)
     return requestLog(logger,mux)
 }
 
@@ -226,8 +231,15 @@ func (s *Server) previewMapping(w http.ResponseWriter,r *http.Request) {
 }
 
 func tenantFrom(r *http.Request,fallback string) string {
+    if principal,ok:=auth.PrincipalFrom(r.Context()); ok { return principal.TenantID }
     if v := strings.TrimSpace(r.Header.Get("X-Tenant-ID")); v != "" { return v }
     return fallback
+}
+
+func actorFrom(r *http.Request) string {
+    if principal,ok:=auth.PrincipalFrom(r.Context()); ok { return principal.ActorID }
+    if v:=strings.TrimSpace(r.Header.Get("X-Actor-ID")); v!="" { return v }
+    return "api-user"
 }
 func allowedUpload(h *multipart.FileHeader,mimeType string) bool {
     switch strings.ToLower(filepath.Ext(filepath.Base(h.Filename))) {

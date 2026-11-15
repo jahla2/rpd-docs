@@ -9,6 +9,7 @@ import (
     "syscall"
     "time"
 
+    "github.com/jahla2/rpd-docs/apps/api/internal/auth"
     "github.com/jahla2/rpd-docs/apps/api/internal/config"
     "github.com/jahla2/rpd-docs/apps/api/internal/httpapi"
     "github.com/jahla2/rpd-docs/apps/api/internal/queue"
@@ -26,9 +27,11 @@ func main() {
     if err != nil { logger.Error("nats startup failed","error",err); os.Exit(1) }
     defer q.Close()
 
+    handler:=httpapi.New(st,storage.NewLocal(cfg.StorageRoot),q,cfg.DefaultTenantID,cfg.APIKeyPepper,logger)
+    handler=auth.Middleware{Store:st,Mode:cfg.AuthMode,Pepper:cfg.APIKeyPepper,Logger:logger}.Wrap(handler)
     srv:=&http.Server{
         Addr:cfg.HTTPAddr,
-        Handler:httpapi.New(st,storage.NewLocal(cfg.StorageRoot),q,cfg.DefaultTenantID,logger),
+        Handler:handler,
         ReadHeaderTimeout:10*time.Second,
     }
     go func(){

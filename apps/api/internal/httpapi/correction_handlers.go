@@ -26,8 +26,7 @@ func (s *Server) getReviewTask(w http.ResponseWriter,r *http.Request){
 func (s *Server) correctDocument(w http.ResponseWriter,r *http.Request){
     tenantID:=tenantFrom(r,s.defaultTenantID)
     documentID:=r.PathValue("id")
-    actor:=strings.TrimSpace(r.Header.Get("X-Actor-ID"))
-    if actor=="" { actor="api-user" }
+    actor:=actorFrom(r)
 
     var req correctDocumentRequest
     decoder:=json.NewDecoder(http.MaxBytesReader(w,r.Body,4<<20))

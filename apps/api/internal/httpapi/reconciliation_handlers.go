@@ -184,8 +184,7 @@ func (s *Server) listReconciliationExceptions(w http.ResponseWriter,r *http.Requ
 }
 
 func (s *Server) approveMatch(w http.ResponseWriter,r *http.Request){
-    actor:=strings.TrimSpace(r.Header.Get("X-Actor-ID"))
-    if actor=="" { actor="api-user" }
+    actor:=actorFrom(r)
     if err:=s.store.ApproveMatch(r.Context(),tenantFrom(r,s.defaultTenantID),r.PathValue("id"),r.PathValue("matchId"),actor); err!=nil {
         writeError(w,http.StatusNotFound,"NOT_FOUND","match not found"); return
     }
@@ -193,8 +192,7 @@ func (s *Server) approveMatch(w http.ResponseWriter,r *http.Request){
 }
 
 func (s *Server) rejectMatch(w http.ResponseWriter,r *http.Request){
-    actor:=strings.TrimSpace(r.Header.Get("X-Actor-ID"))
-    if actor=="" { actor="api-user" }
+    actor:=actorFrom(r)
     if err:=s.store.RejectMatch(r.Context(),tenantFrom(r,s.defaultTenantID),r.PathValue("id"),r.PathValue("matchId"),actor); err!=nil {
         writeError(w,http.StatusNotFound,"NOT_FOUND","match not found"); return
     }
