@@ -1,6 +1,9 @@
 package config
 
-import "os"
+import (
+    "os"
+    "strconv"
+)
 
 type Config struct {
     HTTPAddr string
@@ -17,6 +20,8 @@ type Config struct {
     S3AccessKey string
     S3SecretKey string
     S3CreateBucket bool
+    RateLimitRPS float64
+    RateLimitBurst int
 }
 
 func Load() Config {
@@ -35,6 +40,8 @@ func Load() Config {
         S3AccessKey: value("S3_ACCESS_KEY", ""),
         S3SecretKey: value("S3_SECRET_KEY", ""),
         S3CreateBucket: boolValue("S3_CREATE_BUCKET", false),
+        RateLimitRPS: floatValue("RATE_LIMIT_RPS",20),
+        RateLimitBurst: intValue("RATE_LIMIT_BURST",40),
     }
 }
 
@@ -44,3 +51,6 @@ func value(key, fallback string) string {
 }
 
 func boolValue(key string,fallback bool) bool { v:=os.Getenv(key); if v=="" { return fallback }; return v=="1" || v=="true" || v=="TRUE" || v=="yes" || v=="YES" }
+
+func floatValue(key string,fallback float64) float64 { if v:=os.Getenv(key); v!="" { if parsed,err:=strconv.ParseFloat(v,64); err==nil && parsed>0 { return parsed } }; return fallback }
+func intValue(key string,fallback int) int { if v:=os.Getenv(key); v!="" { if parsed,err:=strconv.Atoi(v); err==nil && parsed>0 { return parsed } }; return fallback }

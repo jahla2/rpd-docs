@@ -19,6 +19,7 @@ func main(){
     flag.Parse()
 
     cfg:=config.Load()
+    if cfg.APIKeyPepper=="" { fmt.Fprintln(os.Stderr,"API_KEY_PEPPER is required"); os.Exit(1) }
     st,err:=store.New(context.Background(),cfg.DatabaseURL)
     if err!=nil { fmt.Fprintln(os.Stderr,err); os.Exit(1) }
     defer st.Close()

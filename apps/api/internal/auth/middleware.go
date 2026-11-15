@@ -15,6 +15,7 @@ type Middleware struct {
     Mode string
     Pepper string
     Logger *slog.Logger
+    Limiter *RateLimiter
 }
 
 func (m Middleware) Wrap(next http.Handler) http.Handler {
@@ -46,6 +47,12 @@ func (m Middleware) Wrap(next http.Handler) http.Handler {
         if required!="" && !permissions[required] {
             authError(w,http.StatusForbidden,"FORBIDDEN","API key does not have the required permission"); return
         }
+        if m.Limiter!=nil && !m.Limiter.Allow(key.ID) {
+            w.Header().Set("Retry-After","1")
+            authError(w,http.StatusTooManyRequests,"RATE_LIMITED","API key request rate exceeded")
+            return
+        }
+
         principal:=Principal{
             APIKeyID:key.ID,TenantID:key.TenantID,ActorID:"api-key:"+key.ID,
             Role:key.Role,Permissions:permissions,
@@ -62,6 +69,8 @@ func requiredPermission(method,path string) string {
     if strings.Contains(path,"/matches/") && (strings.HasSuffix(path,"/approve")||strings.HasSuffix(path,"/reject")) { return "review:write" }
     if strings.HasPrefix(path,"/api/v1/reconciliation-runs") { return permissionByMethod(method,"reconciliation:read","reconciliation:write") }
     if strings.HasPrefix(path,"/api/v1/exports") { return "reconciliation:read" }
+    if strings.HasPrefix(path,"/api/v1/artifacts") { return "document:read" }
+    if strings.HasPrefix(path,"/api/v1/output-profiles") { return permissionByMethod(method,"config:read","config:write") }
     if strings.HasPrefix(path,"/api/v1/datasets") || strings.HasPrefix(path,"/api/v1/mapping-templates") || strings.HasPrefix(path,"/api/v1/suppliers") {
         return permissionByMethod(method,"config:read","config:write")
     }

@@ -33,8 +33,12 @@ func main() {
     })
     if err!=nil { logger.Error("storage startup failed","error",err); os.Exit(1) }
     if err:=storageManager.Ready(); err!=nil { logger.Error("storage readiness failed","error",err); os.Exit(1) }
+    if cfg.AuthMode!="disabled" && cfg.APIKeyPepper=="" {
+        logger.Error("API_KEY_PEPPER is required when authentication is enabled")
+        os.Exit(1)
+    }
     handler:=httpapi.New(st,storageManager,q,cfg.DefaultTenantID,cfg.APIKeyPepper,logger)
-    handler=auth.Middleware{Store:st,Mode:cfg.AuthMode,Pepper:cfg.APIKeyPepper,Logger:logger}.Wrap(handler)
+    handler=auth.Middleware{Store:st,Mode:cfg.AuthMode,Pepper:cfg.APIKeyPepper,Logger:logger,Limiter:auth.NewRateLimiter(cfg.RateLimitRPS,cfg.RateLimitBurst)}.Wrap(handler)
     srv:=&http.Server{
         Addr:cfg.HTTPAddr,
         Handler:handler,
