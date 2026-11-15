@@ -35,8 +35,10 @@ func (s *Server) exportReconciliationRun(w http.ResponseWriter,r *http.Request){
     if err!=nil { writeError(w,http.StatusInternalServerError,"DATABASE_FAILED","failed to read matches"); return }
     exceptions,err:=s.store.ListExceptions(r.Context(),tenantID,runID)
     if err!=nil { writeError(w,http.StatusInternalServerError,"DATABASE_FAILED","failed to read exceptions"); return }
+    groups,err:=s.store.ListMatchGroups(r.Context(),tenantID,runID)
+    if err!=nil { writeError(w,http.StatusInternalServerError,"DATABASE_FAILED","failed to read grouped matches"); return }
 
-    report:=exporter.Report{Run:run,Matches:matches,Exceptions:exceptions}
+    report:=exporter.Report{Run:run,Matches:matches,Exceptions:exceptions,Groups:groups}
     var data []byte
     var contentType,ext string
     if profile!=nil {
@@ -60,7 +62,16 @@ func (s *Server) exportReconciliationRun(w http.ResponseWriter,r *http.Request){
     absolutePath,err:=filepath.Abs(path)
     if err!=nil { writeError(w,http.StatusInternalServerError,"STORAGE_FAILED","failed to resolve export path"); return }
 
-    saved,err:=s.store.CreateExport(r.Context(),exportID,tenantID,runID,format,absolutePath,contentType,int64(len(data)))
+    storageURI,archiveErr:=s.storage.ArchiveFile(
+        r.Context(),absolutePath,
+        filepath.ToSlash(filepath.Join("tenants",tenantID,"exports",exportID,"result."+ext)),
+        contentType,
+    )
+    if archiveErr!=nil {
+        writeError(w,http.StatusInternalServerError,"STORAGE_FAILED","failed to archive export"); return
+    }
+
+    saved,err:=s.store.CreateExport(r.Context(),exportID,tenantID,runID,format,storageURI,contentType,int64(len(data)))
     if err!=nil { writeError(w,http.StatusInternalServerError,"DATABASE_FAILED","failed to register export"); return }
 
     writeJSON(w,http.StatusCreated,map[string]any{

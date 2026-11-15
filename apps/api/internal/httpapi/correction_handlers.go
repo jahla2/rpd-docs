@@ -68,6 +68,19 @@ func (s *Server) correctDocument(w http.ResponseWriter,r *http.Request){
     canonicalPath,_=filepath.Abs(canonicalPath)
     validationPath,_=filepath.Abs(validationPath)
 
+    canonicalURI,archiveErr:=s.storage.ArchiveFile(
+        r.Context(),canonicalPath,
+        filepath.ToSlash(filepath.Join("tenants",tenantID,"documents",documentID,versionID,"canonical.json")),
+        "application/json",
+    )
+    if archiveErr!=nil { writeError(w,http.StatusInternalServerError,"STORAGE_FAILED","failed to archive corrected document"); return }
+    validationURI,archiveErr:=s.storage.ArchiveFile(
+        r.Context(),validationPath,
+        filepath.ToSlash(filepath.Join("tenants",tenantID,"documents",documentID,versionID,"validation.json")),
+        "application/json",
+    )
+    if archiveErr!=nil { writeError(w,http.StatusInternalServerError,"STORAGE_FAILED","failed to archive corrected validation"); return }
+
     afterAudit,_:=json.Marshal(map[string]any{
         "field_updates":req.FieldUpdates,
         "replace_line_items":req.ReplaceLineItems,
@@ -80,8 +93,8 @@ func (s *Server) correctDocument(w http.ResponseWriter,r *http.Request){
         VersionID:versionID,TenantID:tenantID,DocumentID:documentID,SourceVersionID:latest.ID,
         PipelineVersion:"human-correction-v1",MappingTemplateID:latest.MappingTemplateID,
         MappingTemplateVersion:latest.MappingTemplateVersion,CorrectionReason:req.Reason,CorrectedBy:actor,
-        CanonicalPath:canonicalPath,CanonicalSize:int64(len(corrected)),
-        ValidationPath:validationPath,ValidationSize:int64(len(validationBytes)),
+        CanonicalPath:canonicalURI,CanonicalSize:int64(len(corrected)),
+        ValidationPath:validationURI,ValidationSize:int64(len(validationBytes)),
         RequiresReview:validation.RequiresReview,ReviewTaskID:req.ReviewTaskID,
         AuditBefore:before,AuditAfter:afterAudit,
     })

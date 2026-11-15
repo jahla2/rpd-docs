@@ -74,7 +74,7 @@ func BuildWithProfile(profile Profile,report Report)([]byte,string,string,error)
 }
 
 func profileRows(report Report) []map[string]string {
-    rows:=make([]map[string]string,0,len(report.Matches)+len(report.Exceptions))
+    rows:=make([]map[string]string,0,len(report.Matches)+len(report.Groups)+len(report.Exceptions))
     for _,m:=range report.Matches {
         row:=map[string]string{
             "record_type":"match","source_record_id":m.SourceRecordID,"target_record_id":m.TargetRecordID,
@@ -84,6 +84,17 @@ func profileRows(report Report) []map[string]string {
         if m.ApprovedBy!=nil { row["approved_by"]=*m.ApprovedBy }
         if m.ApprovedAt!=nil { row["approved_at"]=m.ApprovedAt.Format("2006-01-02T15:04:05Z07:00") }
         rows=append(rows,row)
+    }
+    for _,g:=range report.Groups {
+        rows=append(rows,map[string]string{
+            "record_type":"group",
+            "source_record_id":strings.Join(g.SourceDocumentIDs,";"),
+            "target_record_id":strings.Join(g.TargetRecordIDs,";"),
+            "status":g.Status,
+            "score":g.Score,
+            "matching_rule":g.GroupType,
+            "difference_amount":g.DifferenceAmount,
+        })
     }
     for _,e:=range report.Exceptions {
         row:=map[string]string{

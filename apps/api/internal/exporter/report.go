@@ -6,6 +6,7 @@ import (
     "encoding/json"
     "fmt"
     "strconv"
+    "strings"
 
     "github.com/jahla2/rpd-docs/apps/api/internal/store"
     "github.com/xuri/excelize/v2"
@@ -15,6 +16,7 @@ type Report struct {
     Run store.ReconciliationRun `json:"run"`
     Matches []store.ReconciliationMatch `json:"matches"`
     Exceptions []store.ReconciliationException `json:"exceptions"`
+    Groups []store.ReconciliationMatchGroup `json:"groups,omitempty"`
 }
 
 func Build(format string,report Report)([]byte,string,string,error){
@@ -45,6 +47,12 @@ func buildCSV(report Report)([]byte,error){
         if m.DifferenceAmount!=nil { diff=*m.DifferenceAmount }
         rows=append(rows,[]string{
             "match",m.SourceRecordID,m.TargetRecordID,m.Status,m.Score,m.MatchingRule,diff,"","","",
+        })
+    }
+    for _,g:=range report.Groups {
+        rows=append(rows,[]string{
+            "group",strings.Join(g.SourceDocumentIDs,";"),strings.Join(g.TargetRecordIDs,";"),
+            g.Status,g.Score,g.GroupType,g.DifferenceAmount,"","","",
         })
     }
     for _,e:=range report.Exceptions {

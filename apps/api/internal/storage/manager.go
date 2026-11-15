@@ -100,6 +100,18 @@ func (m *Manager) SaveOriginal(tenantID,documentID,originalName string,src io.Re
     return saved,nil
 }
 
+func (m *Manager) ArchiveFile(ctx context.Context,localPath,key,contentType string)(string,error){
+    if m.backend!="s3" { return localPath,nil }
+    if m.s3==nil { return "",fmt.Errorf("S3 storage is not configured") }
+    key=filepath.ToSlash(strings.TrimPrefix(key,"/"))
+    if contentType=="" { contentType="application/octet-stream" }
+    uploadCtx,cancel:=context.WithTimeout(ctx,3*time.Minute)
+    defer cancel()
+    _,err:=m.s3.FPutObject(uploadCtx,m.bucket,key,localPath,minio.PutObjectOptions{ContentType:contentType})
+    if err!=nil { return "",err }
+    return "s3://"+m.bucket+"/"+key,nil
+}
+
 func (m *Manager) Read(uri string)([]byte,error){
     if !strings.HasPrefix(uri,"s3://") { return os.ReadFile(uri) }
     if m.s3==nil { return nil,fmt.Errorf("S3 storage is not configured") }
