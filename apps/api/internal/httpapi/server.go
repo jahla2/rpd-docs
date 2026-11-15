@@ -73,6 +73,9 @@ func New(st *store.Store, fs *storage.Local, q *queue.Publisher, defaultTenantID
     mux.HandleFunc("POST /api/v1/review-tasks/{id}/resolve", s.resolveReviewTask)
     mux.HandleFunc("GET /api/v1/exports/{id}", s.getExport)
     mux.HandleFunc("GET /api/v1/exports/{id}/download", s.downloadExport)
+    mux.HandleFunc("GET /api/v1/suppliers", s.searchSuppliers)
+    mux.HandleFunc("POST /api/v1/suppliers", s.createSupplier)
+    mux.HandleFunc("POST /api/v1/suppliers/{id}/aliases", s.addSupplierAlias)
     return requestLog(logger,mux)
 }
 

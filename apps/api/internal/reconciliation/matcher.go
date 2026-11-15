@@ -34,6 +34,12 @@ func NormalizeReference(v string) string {
 }
 
 func Match(source,target Record,absoluteTolerance string,dateWindowDays int) (Result,error) {
+    similarity:=0.0
+    if NormalizeReference(source.Supplier)==NormalizeReference(target.Supplier) { similarity=1.0 }
+    return MatchAdvanced(source,target,absoluteTolerance,dateWindowDays,similarity)
+}
+
+func MatchAdvanced(source,target Record,absoluteTolerance string,dateWindowDays int,supplierSimilarity float64) (Result,error) {
     sourceAmount,ok:=new(big.Rat).SetString(source.Amount); if !ok { return Result{},fmt.Errorf("invalid source amount %q",source.Amount) }
     targetAmount,ok:=new(big.Rat).SetString(target.Amount); if !ok { return Result{},fmt.Errorf("invalid target amount %q",target.Amount) }
     tolerance,ok:=new(big.Rat).SetString(absoluteTolerance); if !ok { return Result{},fmt.Errorf("invalid tolerance %q",absoluteTolerance) }
@@ -42,6 +48,9 @@ func Match(source,target Record,absoluteTolerance string,dateWindowDays int) (Re
     if diff.Sign()<0 { diff.Neg(diff) }
 
     supplierEqual:=NormalizeReference(source.Supplier)==NormalizeReference(target.Supplier)
+    if supplierEqual { supplierSimilarity=1.0 }
+    if supplierSimilarity<0 { supplierSimilarity=0 }
+    if supplierSimilarity>1 { supplierSimilarity=1 }
     referenceEqual:=NormalizeReference(source.Reference)==NormalizeReference(target.Reference)
     currencyEqual:=strings.EqualFold(strings.TrimSpace(source.Currency),strings.TrimSpace(target.Currency))
     amountExact:=diff.Sign()==0
@@ -57,7 +66,15 @@ func Match(source,target Record,absoluteTolerance string,dateWindowDays int) (Re
 
     score:=0
     if referenceEqual { score+=40 }
-    if supplierEqual { score+=25 }
+    supplierPoints:=0
+    switch {
+    case supplierEqual: supplierPoints=25
+    case supplierSimilarity>=0.90: supplierPoints=23
+    case supplierSimilarity>=0.80: supplierPoints=20
+    case supplierSimilarity>=0.70: supplierPoints=15
+    case supplierSimilarity>=0.60: supplierPoints=8
+    }
+    score+=supplierPoints
     if amountExact { score+=20 } else if amountWithin { score+=15 }
     if dateWithin { score+=10 }
     if currencyEqual { score+=5 }
@@ -79,7 +96,8 @@ func Match(source,target Record,absoluteTolerance string,dateWindowDays int) (Re
         SourceID:source.ID,TargetID:target.ID,Status:status,Score:score,
         MatchingRule:rule,Difference:diff.FloatString(4),
         Evidence:map[string]any{
-            "supplier_equal":supplierEqual,"reference_equal":referenceEqual,
+            "supplier_equal":supplierEqual,"supplier_similarity":supplierSimilarity,"supplier_points":supplierPoints,
+            "reference_equal":referenceEqual,
             "currency_equal":currencyEqual,"amount_exact":amountExact,
             "amount_within_tolerance":amountWithin,"date_within_window":dateWithin,
             "date_difference_days":days,

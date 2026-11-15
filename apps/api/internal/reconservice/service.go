@@ -170,21 +170,31 @@ func (s *Service) reconcileDocument(
         }
     }
 
-    candidates,err:=s.Store.CandidateERPRecords(
+    supplierKeys,err:=s.Store.ResolveSupplierKeys(ctx,tenantID,supplier,cfg.FuzzySupplierThreshold)
+    if err!=nil { return "",err }
+
+    candidates,err:=s.Store.CandidateERPRecordsAdvanced(
         ctx,tenantID,datasetID,
         reconciliation.NormalizeReference(reference),
-        reconciliation.NormalizeReference(supplier),
+        supplier,
         currency,
         amount,
+        supplierKeys,
         invoiceDate,
         cfg.AbsoluteTolerance,
         cfg.DateWindowDays,
+        cfg.FuzzySupplierThreshold,
     )
     if err!=nil { return "",err }
 
     if len(candidates)==0 {
+        matched,groupErr:=s.tryOneToMany(ctx,tenantID,runID,datasetID,documentID,supplier,currency,amount,
+            supplierKeys,invoiceDate,cfg)
+        if groupErr!=nil { return "",groupErr }
+        if matched { return "MATCHED",nil }
+
         if err:=s.Store.SaveException(ctx,tenantID,runID,documentID,
-            "UNMATCHED","WARNING","no ERP candidate matched indexed filters",map[string]any{
+            "UNMATCHED","WARNING","no ERP candidate matched indexed or grouped filters",map[string]any{
                 "supplier":supplier,"reference":reference,"currency":currency,
                 "amount":amount,"candidate_count":0,
             }); err!=nil { return "",err }
@@ -198,7 +208,7 @@ func (s *Service) reconcileDocument(
     for _,candidate:=range candidates {
         targetDate:=time.Time{}
         if candidate.RecordDate!=nil { targetDate=*candidate.RecordDate }
-        result,matchErr:=reconciliation.Match(
+        result,matchErr:=reconciliation.MatchAdvanced(
             reconciliation.Record{
                 ID:documentID,Supplier:supplier,Reference:reference,
                 Currency:currency,Amount:amount,Date:sourceDate,
@@ -207,7 +217,7 @@ func (s *Service) reconcileDocument(
                 ID:candidate.ID,Supplier:candidate.SupplierName,Reference:candidate.Reference,
                 Currency:candidate.Currency,Amount:candidate.Amount,Date:targetDate,
             },
-            cfg.AbsoluteTolerance,cfg.DateWindowDays,
+            cfg.AbsoluteTolerance,cfg.DateWindowDays,candidate.SupplierSimilarity,
         )
         if matchErr!=nil { continue }
         results=append(results,result)
@@ -264,4 +274,52 @@ func (s *Service) reconcileDocument(
 
     if err:=s.Store.SaveMatch(ctx,tenantID,runID,best); err!=nil { return "",err }
     return "MATCHED",nil
+}
+
+
+func (s *Service) tryOneToMany(
+    ctx context.Context,
+    tenantID,runID,datasetID,documentID,supplier,currency,amount string,
+    supplierKeys []string,
+    invoiceDate *time.Time,
+    cfg Config,
+)(bool,error){
+    candidates,err:=s.Store.CandidateERPGroupRecords(
+        ctx,tenantID,datasetID,supplier,currency,amount,supplierKeys,invoiceDate,
+        cfg.AbsoluteTolerance,cfg.DateWindowDays,cfg.FuzzySupplierThreshold)
+    if err!=nil { return false,err }
+    if len(candidates)<2 { return false,nil }
+
+    amounts:=make([]reconciliation.AmountEntry,0,len(candidates))
+    byID:=make(map[string]store.AdvancedCandidateRecord,len(candidates))
+    for _,candidate:=range candidates {
+        amounts=append(amounts,reconciliation.AmountEntry{ID:candidate.ID,Amount:candidate.Amount})
+        byID[candidate.ID]=candidate
+    }
+
+    combination,ok,err:=reconciliation.FindAmountCombination(amounts,amount,cfg.AbsoluteTolerance,cfg.MaxGroupSize)
+    if err!=nil || !ok { return false,err }
+
+    targets:=make([]store.MatchGroupMember,0,len(combination.IDs))
+    similarities:=make([]float64,0,len(combination.IDs))
+    for _,id:=range combination.IDs {
+        candidate:=byID[id]
+        targets=append(targets,store.MatchGroupMember{ID:id,Amount:candidate.Amount})
+        similarities=append(similarities,candidate.SupplierSimilarity)
+    }
+    minSimilarity:=1.0
+    for _,value:=range similarities { if value<minSimilarity { minSimilarity=value } }
+    score:=90
+    if combination.Difference=="0.0000" { score=95 }
+    if minSimilarity>=0.90 { score+=5 }
+    if score>100 { score=100 }
+
+    err=s.Store.SaveOneToManyMatchGroup(
+        ctx,tenantID,runID,documentID,targets,amount,combination.Total,combination.Difference,score,
+        map[string]any{
+            "rule":"one_invoice_to_many_erp_records",
+            "supplier_similarity_min":minSimilarity,
+            "target_record_ids":combination.IDs,
+        })
+    return err==nil,err
 }
