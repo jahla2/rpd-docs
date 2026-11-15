@@ -91,12 +91,16 @@ type Worker struct {
     NativeEnginePath string
     AIEngineURL string
     HTTP *http.Client
+    AgentFallbackEnabled bool
+    AgentMinConfidence float64
 }
 
-func New(db *pgxpool.Pool, logger *slog.Logger, storageRoot,nativePath,aiURL string) *Worker {
+func New(db *pgxpool.Pool, logger *slog.Logger, storageRoot,nativePath,aiURL string,agentEnabled bool,agentMinConfidence float64) *Worker {
+    if agentMinConfidence<=0 || agentMinConfidence>1 { agentMinConfidence=0.90 }
     return &Worker{
         DB:db,Logger:logger,StorageRoot:storageRoot,NativeEnginePath:nativePath,AIEngineURL:aiURL,
         HTTP:&http.Client{Timeout:5*time.Minute},
+        AgentFallbackEnabled:agentEnabled,AgentMinConfidence:agentMinConfidence,
     }
 }
 
@@ -299,6 +303,30 @@ func (w *Worker) HandlePreprocess(ctx context.Context, job JobMessage) error {
 
     validationResult,err:=validation.ValidateInvoice(canonicalBody,"0.01")
     if err!=nil { return w.fail(ctx,job,fmt.Errorf("validate canonical invoice: %w",err)) }
+
+    var agentTrace []byte
+    if w.AgentFallbackEnabled && (canonical.RequiresReview || validationResult.RequiresReview) {
+        resolved,trace,agentErr:=w.tryAgentFallback(ctx,job,canonicalBody,validationResult,extractions)
+        if agentErr!=nil {
+            w.Logger.Warn("agent_fallback_skipped","error",agentErr,"document_id",job.DocumentID)
+        } else if len(resolved)>0 {
+            candidateValidation,validateErr:=validation.ValidateInvoice(resolved,"0.01")
+            if validateErr==nil {
+                var traceEnvelope map[string]any
+                _=json.Unmarshal(trace,&traceEnvelope)
+                confidence,_:=traceEnvelope["confidence"].(float64)
+                if confidence>=w.AgentMinConfidence && !candidateValidation.RequiresReview {
+                    canonicalBody=resolved
+                    validationResult=candidateValidation
+                    canonical.RequiresReview=false
+                    agentTrace=trace
+                } else {
+                    agentTrace=trace
+                }
+            }
+        }
+    }
+
     validationBody,err:=json.MarshalIndent(validationResult,"","  ")
     if err!=nil { return w.fail(ctx,job,err) }
 
@@ -310,6 +338,15 @@ func (w *Worker) HandlePreprocess(ctx context.Context, job JobMessage) error {
     if err!=nil { return w.fail(ctx,job,err) }
     if err:=w.addVersionArtifact(ctx,job,versionID,"CANONICAL_JSON",canonicalPath,strPtr("application/json")); err!=nil {
         return w.fail(ctx,job,err)
+    }
+
+    if len(agentTrace)>0 {
+        agentPath,agentErr:=writeArtifactFile(finalDir,"agent-trace.json",agentTrace)
+        if agentErr!=nil { return w.fail(ctx,job,agentErr) }
+        if err:=w.addVersionArtifact(ctx,job,versionID,"AGENT_TRACE_JSON",agentPath,strPtr("application/json")); err!=nil {
+            return w.fail(ctx,job,err)
+        }
+        _=w.persistAgentRun(ctx,job,versionID,agentTrace)
     }
 
     validationPath,err:=writeArtifactFile(finalDir,"validation.json",validationBody)
@@ -541,3 +578,54 @@ func (w *Worker) addVersionArtifact(ctx context.Context,job JobMessage,versionID
 }
 
 func strPtr(v string)*string { return &v }
+
+
+func (w *Worker) tryAgentFallback(
+    ctx context.Context,job JobMessage,canonicalBody []byte,validationResult validation.Result,pages []pageExtraction,
+)([]byte,[]byte,error){
+    var canonical map[string]any
+    if err:=json.Unmarshal(canonicalBody,&canonical); err!=nil { return nil,nil,err }
+    validationJSON,err:=json.Marshal(validationResult)
+    if err!=nil { return nil,nil,err }
+    var validationMap map[string]any
+    if err:=json.Unmarshal(validationJSON,&validationMap); err!=nil { return nil,nil,err }
+
+    response,err:=w.postJSON(ctx,"/v1/agent/resolve-invoice",map[string]any{
+        "document_id":job.DocumentID,
+        "trigger_code":"DETERMINISTIC_REVIEW_REQUIRED",
+        "canonical":canonical,
+        "validation":validationMap,
+        "pages":pages,
+    })
+    if err!=nil { return nil,nil,err }
+
+    var envelope struct {
+        Confidence float64 `json:"confidence"`
+        ResolvedCanonical map[string]any `json:"resolved_canonical"`
+    }
+    if err:=json.Unmarshal(response,&envelope); err!=nil { return nil,nil,err }
+    if envelope.Confidence<w.AgentMinConfidence || envelope.ResolvedCanonical==nil {
+        return nil,response,nil
+    }
+    resolved,err:=json.MarshalIndent(envelope.ResolvedCanonical,"","  ")
+    return resolved,response,err
+}
+
+func (w *Worker) persistAgentRun(ctx context.Context,job JobMessage,versionID string,trace []byte) error {
+    var envelope struct {
+        Provider string `json:"provider"`
+        Model string `json:"model"`
+        PromptVersion string `json:"prompt_version"`
+        Confidence float64 `json:"confidence"`
+    }
+    if err:=json.Unmarshal(trace,&envelope); err!=nil { return err }
+    _,err:=w.DB.Exec(ctx,`
+      INSERT INTO agent_runs
+        (tenant_id,document_id,document_version_id,run_id,trigger_code,provider,model,prompt_version,
+         status,confidence,input_json,output_json,completed_at)
+      VALUES ($1,$2,$3,$4,'DETERMINISTIC_REVIEW_REQUIRED',$5,$6,$7,'COMPLETED',$8,
+              '{}'::jsonb,$9::jsonb,now())
+    `,job.TenantID,job.DocumentID,versionID,job.RunID,envelope.Provider,envelope.Model,
+      envelope.PromptVersion,envelope.Confidence,string(trace))
+    return err
+}

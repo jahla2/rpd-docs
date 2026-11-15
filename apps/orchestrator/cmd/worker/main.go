@@ -6,7 +6,7 @@ import (
     "log/slog"
     "os"
     "os/signal"
-    "syscall"
+    "syscall"\n    "strconv"
 
     "github.com/jackc/pgx/v5/pgxpool"
     "github.com/jahla2/rpd-docs/apps/orchestrator/internal/config"
@@ -34,7 +34,8 @@ func main() {
         }); addErr!=nil { logger.Error("ensure stream failed","error",addErr); os.Exit(1) }
     }
 
-    worker:=pipeline.New(db,logger,cfg.StorageRoot,cfg.NativeEnginePath,cfg.AIEngineURL)
+    minConfidence,_:=strconv.ParseFloat(cfg.AgentMinConfidence,64)
+    worker:=pipeline.New(db,logger,cfg.StorageRoot,cfg.NativeEnginePath,cfg.AIEngineURL,cfg.AgentFallbackEnabled,minConfidence)
     _,err=js.QueueSubscribe("document.preprocess","rpd-preprocess-workers",func(m *nats.Msg){
         var job pipeline.JobMessage
         if err:=json.Unmarshal(m.Data,&job); err!=nil {

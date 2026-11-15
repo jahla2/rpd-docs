@@ -10,7 +10,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from app.extraction.invoice import extract_invoice, extract_invoice_document\nfrom app.pdftext.poppler import parse_bbox_layout
+from app.extraction.invoice import extract_invoice, extract_invoice_document\nfrom app.agents.invoice_resolver import apply_proposal, resolve_invoice\nfrom app.pdftext.poppler import parse_bbox_layout
 from app.ocr.rapidocr_adapter import RapidOCREngine
 from app.tables.region import detect_table_region, translate_ocr_blocks
 from app.tables.slanet_adapter import SLANetTableEngine
@@ -181,3 +181,37 @@ def run_invoice_document_extraction(request: InvoiceDocumentExtractRequest) -> d
         ],
         mapping_config=request.mapping_config,
     )
+
+
+class AgentInvoiceResolveRequest(BaseModel):
+    document_id: str
+    trigger_code: str
+    canonical: dict[str, Any]
+    validation: dict[str, Any]
+    pages: list[dict[str, Any]] = Field(default_factory=list)
+
+
+@app.post("/v1/agent/resolve-invoice")
+def run_agent_invoice_resolution(request: AgentInvoiceResolveRequest) -> dict[str, Any]:
+    try:
+        proposal = resolve_invoice(
+            canonical=request.canonical,
+            validation=request.validation,
+            pages=request.pages,
+            trigger_code=request.trigger_code,
+        )
+        resolved = apply_proposal(request.canonical, proposal)
+        return {
+            "provider": proposal.provider,
+            "model": proposal.model,
+            "prompt_version": proposal.prompt_version,
+            "confidence": proposal.confidence,
+            "field_updates": proposal.field_updates,
+            "evidence_block_ids": proposal.evidence_block_ids,
+            "summary": proposal.summary,
+            "resolved_canonical": resolved,
+        }
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"AGENT_RESOLUTION_FAILED: {exc}") from exc
