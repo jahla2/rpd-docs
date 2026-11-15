@@ -9,7 +9,7 @@ import (
     "io"
     "path/filepath"
     "sort"
-    "strconv"
+    "math/big"
     "strings"
     "time"
 
@@ -254,9 +254,9 @@ func normalizeAmount(v string) string {
     if cleaned=="" { return "" }
     replacer:=strings.NewReplacer(",","","₱","","$","","€","","PHP","","USD","","EUR","")
     cleaned=strings.TrimSpace(replacer.Replace(cleaned))
-    n,err:=strconv.ParseFloat(cleaned,64)
-    if err!=nil { return "" }
-    return strconv.FormatFloat(n,'f',4,64)
+    value,ok:=new(big.Rat).SetString(cleaned)
+    if !ok { return "" }
+    return value.FloatString(4)
 }
 
 func parseDate(v string)(time.Time,bool){

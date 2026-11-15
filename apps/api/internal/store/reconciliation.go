@@ -173,9 +173,9 @@ func (s *Store) SaveException(
 
     _,err=tx.Exec(ctx,`
       INSERT INTO review_tasks
-        (tenant_id,reconciliation_run_id,task_type,status,priority,reason)
-      VALUES ($1,$2,'RECONCILIATION_EXCEPTION','OPEN',100,$3)
-    `,tenantID,runID,message)
+        (tenant_id,reconciliation_run_id,source_record_id,task_type,status,priority,reason)
+      VALUES ($1,$2,$3,'RECONCILIATION_EXCEPTION','OPEN',100,$4)
+    `,tenantID,runID,sourceID,message)
     if err!=nil { return err }
 
     return tx.Commit(ctx)
