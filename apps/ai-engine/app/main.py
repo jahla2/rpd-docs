@@ -4,6 +4,7 @@ import importlib.util
 from dataclasses import asdict
 from functools import lru_cache
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
@@ -11,9 +12,10 @@ from pydantic import BaseModel, Field
 
 from app.extraction.invoice import extract_invoice
 from app.ocr.rapidocr_adapter import RapidOCREngine
+from app.tables.region import detect_table_region, translate_ocr_blocks
 from app.tables.slanet_adapter import SLANetTableEngine
 
-app = FastAPI(title="RPD AI Engine", version="0.2.0")
+app = FastAPI(title="RPD AI Engine", version="0.3.0")
 
 
 class OCRRequest(BaseModel):
@@ -34,6 +36,7 @@ class TableRequest(BaseModel):
     page: int = Field(default=1, ge=1)
     image_path: str
     ocr_blocks: list[OCRBlockInput] = Field(default_factory=list)
+    auto_crop: bool = True
 
 
 class InvoiceExtractRequest(BaseModel):
@@ -93,19 +96,47 @@ def run_tables(request: TableRequest) -> dict:
     if not path.exists() or not path.is_file():
         raise HTTPException(status_code=400, detail="image_path does not exist")
 
+    blocks = [block.model_dump() for block in request.ocr_blocks]
+    table_input_path = str(path)
+    table_blocks = blocks
+    region_bbox: list[int] | None = None
+    temp_dir: TemporaryDirectory | None = None
+
     try:
+        if request.auto_crop and blocks:
+            try:
+                from PIL import Image
+            except ImportError as exc:
+                raise RuntimeError("Pillow is required for automatic table cropping") from exc
+
+            with Image.open(path) as image:
+                width, height = image.size
+                region_bbox = detect_table_region(blocks, width, height)
+
+                if region_bbox is not None:
+                    temp_dir = TemporaryDirectory(prefix="rpd-table-")
+                    crop_path = Path(temp_dir.name) / "table-region.png"
+                    image.crop(tuple(region_bbox)).save(crop_path)
+                    table_input_path = str(crop_path)
+                    table_blocks = translate_ocr_blocks(blocks, region_bbox)
+
         result = table_engine().process(
-            str(path),
-            ocr_blocks=[block.model_dump() for block in request.ocr_blocks],
+            table_input_path,
+            ocr_blocks=table_blocks,
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"TABLE_RECOGNITION_FAILED: {exc}") from exc
+    finally:
+        if temp_dir is not None:
+            temp_dir.cleanup()
 
     response = asdict(result)
     response["document_id"] = request.document_id
     response["page"] = request.page
+    response["region_bbox"] = region_bbox
+    response["ocr_reused"] = len(table_blocks) > 0
     return response
 
 
