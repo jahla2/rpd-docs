@@ -311,7 +311,7 @@ INVOICE_NUMBER = re.compile(
     re.IGNORECASE,
 )
 INVOICE_DATE = re.compile(
-    r"(?:invoice\s*date|date)\s*[:#-]?\s*([A-Z0-9,./-]+(?:\s+[A-Z0-9,./-]+)?)",
+    r"(?:invoice\s*date|^date)\s*[:#-]?\s*([A-Z0-9,./-]+(?:\s+[A-Z0-9,./-]+)?)",
     re.IGNORECASE,
 )
 DUE_DATE = re.compile(
@@ -331,7 +331,7 @@ TAX_TOTAL = re.compile(
     re.IGNORECASE,
 )
 GRAND_TOTAL = re.compile(
-    r"(?:grand\s*total|invoice\s*total|total\s*due|amount\s*due|total)\s*[:#-]?\s*(?:PHP|USD|EUR|₱|\$|€)?\s*([0-9][0-9,]*(?:\.[0-9]{1,4})?)",
+    r"(?:grand\s*total|invoice\s*total|total\s*due|amount\s*due|^total)\s*[:#-]?\s*(?:PHP|USD|EUR|₱|\$|€)?\s*([0-9][0-9,]*(?:\.[0-9]{1,4})?)",
     re.IGNORECASE,
 )
 

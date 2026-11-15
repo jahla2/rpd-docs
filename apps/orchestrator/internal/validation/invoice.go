@@ -138,9 +138,8 @@ func ValidateInvoice(data []byte,tolerance string)(Result,error){
     }
 
     tax,taxOK:=parse(fieldValue(inv.Tax))
-    if subtotalOK && grandOK {
-        expected:=new(big.Rat).Set(subtotal)
-        if taxOK { expected.Add(expected,tax) }
+    if subtotalOK && grandOK && taxOK {
+        expected:=new(big.Rat).Add(new(big.Rat).Set(subtotal),tax)
         difference:=absDiff(expected,grandTotal)
         if difference.Cmp(tol)>0 {
             result.add(RuleResult{
@@ -148,7 +147,7 @@ func ValidateInvoice(data []byte,tolerance string)(Result,error){
                 Message:"subtotal plus tax does not equal grand_total",
                 Evidence:map[string]any{
                     "subtotal":subtotal.FloatString(4),
-                    "tax":fieldValue(inv.Tax),
+                    "tax":tax.FloatString(4),
                     "grand_total":grandTotal.FloatString(4),
                     "expected":expected.FloatString(4),
                     "difference":difference.FloatString(4),
@@ -158,6 +157,24 @@ func ValidateInvoice(data []byte,tolerance string)(Result,error){
             result.add(RuleResult{
                 Code:"SUBTOTAL_TAX_GRAND_TOTAL",Status:"PASS",Severity:"INFO",
                 Message:"subtotal plus tax matches grand_total",
+            })
+        }
+    } else if subtotalOK && grandOK && !taxOK {
+        difference:=absDiff(subtotal,grandTotal)
+        if difference.Cmp(tol)<=0 {
+            result.add(RuleResult{
+                Code:"SUBTOTAL_GRAND_TOTAL",Status:"PASS",Severity:"INFO",
+                Message:"subtotal matches grand_total when no tax was extracted",
+            })
+        } else {
+            result.add(RuleResult{
+                Code:"TAX_NOT_AVAILABLE_FOR_TOTAL_CHECK",Status:"WARN",Severity:"WARNING",
+                Message:"subtotal differs from grand_total but tax was not extracted; arithmetic check was not treated as a failure",
+                Evidence:map[string]any{
+                    "subtotal":subtotal.FloatString(4),
+                    "grand_total":grandTotal.FloatString(4),
+                    "difference":difference.FloatString(4),
+                },
             })
         }
     }

@@ -454,13 +454,13 @@ func (w *Worker) emitEvent(
     if data!=nil {
         encoded,err:=json.Marshal(data)
         if err!=nil { return err }
-        dataJSON=encoded
+        dataJSON=string(encoded)
     }
 
     _,err:=w.DB.Exec(ctx,`
       INSERT INTO job_events
         (tenant_id,job_id,document_id,event_type,status,progress,page_number,total_pages,data_json)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb)
     `,job.TenantID,job.JobID,job.DocumentID,eventType,status,progress,pageNumber,totalPages,dataJSON)
     return err
 }
