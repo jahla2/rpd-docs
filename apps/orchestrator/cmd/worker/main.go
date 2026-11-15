@@ -6,7 +6,8 @@ import (
     "log/slog"
     "os"
     "os/signal"
-    "syscall"\n    "strconv"
+    "strconv"
+    "syscall"
 
     "github.com/jackc/pgx/v5/pgxpool"
     "github.com/jahla2/rpd-docs/apps/orchestrator/internal/config"
@@ -31,7 +32,7 @@ func main() {
     if err!=nil { logger.Error("jetstream failed","error",err); os.Exit(1) }
     if _,err:=js.StreamInfo("RPD_DOCUMENTS"); err!=nil {
         if _,addErr:=js.AddStream(&nats.StreamConfig{
-            Name:"RPD_DOCUMENTS",Subjects:[]string{"document.*"},Storage:nats.FileStorage,
+            Name:"RPD_DOCUMENTS",Subjects:[]string{"document.*","reconciliation.*"},Storage:nats.FileStorage,
         }); addErr!=nil { logger.Error("ensure stream failed","error",addErr); os.Exit(1) }
     }
 
