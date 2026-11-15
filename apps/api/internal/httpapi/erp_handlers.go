@@ -3,10 +3,12 @@ package httpapi
 import (
     "encoding/json"
     "net/http"
+    "os"
     "path/filepath"
     "strings"
 
     "github.com/jahla2/rpd-docs/apps/api/internal/erp"
+    "github.com/jahla2/rpd-docs/apps/api/internal/store"
 )
 
 type createDatasetRequest struct {
@@ -79,18 +81,51 @@ func (s *Server) importDataset(w http.ResponseWriter,r *http.Request){
         }
     }
 
-    result,err:=erp.Parse(header.Filename,file,overrides)
+    saved,err:=s.storage.SaveDatasetImport(tenantID,datasetID,header.Filename,file)
     if err!=nil {
-        writeError(w,http.StatusBadRequest,"IMPORT_FAILED",err.Error()); return
+        writeError(w,http.StatusInternalServerError,"STORAGE_FAILED","failed to preserve ERP import"); return
+    }
+    parsedFile,err:=os.Open(saved.LocalPath)
+    if err!=nil {
+        writeError(w,http.StatusInternalServerError,"STORAGE_FAILED","failed to reopen ERP import"); return
+    }
+    result,parseErr:=erp.Parse(header.Filename,parsedFile,overrides)
+    _=parsedFile.Close()
+    if parseErr!=nil {
+        importRecord,_:=s.store.RecordERPImport(r.Context(),store.ERPImportRecord{
+            TenantID:tenantID,DatasetID:datasetID,OriginalFilename:filepath.Base(header.Filename),
+            StorageURI:saved.StorageURI,SHA256:saved.SHA256,SizeBytes:saved.Size,Status:"FAILED",
+            Mapping:overrides,Errors:[]any{},ErrorMessage:parseErr.Error(),
+        })
+        writeJSON(w,http.StatusBadRequest,map[string]any{
+            "error":map[string]string{"code":"IMPORT_FAILED","message":parseErr.Error()},
+            "import":importRecord,
+        })
+        return
     }
 
     inserted,skipped,err:=s.store.ImportERPRecords(r.Context(),tenantID,datasetID,result.Rows)
     if err!=nil {
+        _,_=s.store.RecordERPImport(r.Context(),store.ERPImportRecord{
+            TenantID:tenantID,DatasetID:datasetID,OriginalFilename:filepath.Base(header.Filename),
+            StorageURI:saved.StorageURI,SHA256:saved.SHA256,SizeBytes:saved.Size,Status:"FAILED",
+            Mapping:result.Mapping,ValidRows:len(result.Rows),Errors:result.Errors,ErrorMessage:err.Error(),
+        })
         writeError(w,http.StatusInternalServerError,"DATABASE_FAILED","failed to store ERP records"); return
+    }
+    importRecord,recordErr:=s.store.RecordERPImport(r.Context(),store.ERPImportRecord{
+        TenantID:tenantID,DatasetID:datasetID,OriginalFilename:filepath.Base(header.Filename),
+        StorageURI:saved.StorageURI,SHA256:saved.SHA256,SizeBytes:saved.Size,Status:"COMPLETED",
+        Mapping:result.Mapping,ValidRows:len(result.Rows),InsertedRows:inserted,
+        DuplicateRows:skipped,Errors:result.Errors,
+    })
+    if recordErr!=nil {
+        writeError(w,http.StatusInternalServerError,"DATABASE_FAILED","ERP rows imported but provenance could not be recorded"); return
     }
 
     writeJSON(w,http.StatusOK,map[string]any{
         "dataset_id":datasetID,
+        "import":importRecord,
         "headers":result.Headers,
         "mapping":result.Mapping,
         "valid_rows":len(result.Rows),
@@ -98,6 +133,12 @@ func (s *Server) importDataset(w http.ResponseWriter,r *http.Request){
         "duplicates_skipped":skipped,
         "errors":result.Errors,
     })
+}
+
+func (s *Server) listDatasetImports(w http.ResponseWriter,r *http.Request){
+    items,err:=s.store.ListERPImports(r.Context(),tenantFrom(r,s.defaultTenantID),r.PathValue("id"))
+    if err!=nil { writeError(w,http.StatusInternalServerError,"DATABASE_FAILED","failed to list ERP imports"); return }
+    writeJSON(w,http.StatusOK,map[string]any{"items":items})
 }
 
 func (s *Server) listDatasetRecords(w http.ResponseWriter,r *http.Request){

@@ -2,6 +2,8 @@ package storage
 
 import (
     "context"
+    "crypto/sha256"
+    "encoding/hex"
     "fmt"
     "io"
     "net/url"
@@ -75,6 +77,39 @@ func (m *Manager) Ready() error {
     if exists { return nil }
     if !m.createBucket { return fmt.Errorf("S3 bucket %q does not exist",m.bucket) }
     return m.s3.MakeBucket(ctx,m.bucket,minio.MakeBucketOptions{Region:m.region})
+}
+
+type SavedDatasetImport struct {
+    LocalPath string
+    StorageURI string
+    SHA256 string
+    Size int64
+}
+
+func (m *Manager) SaveDatasetImport(tenantID,datasetID,originalName string,src io.Reader)(SavedDatasetImport,error){
+    stamp:=time.Now().UTC().Format("20060102T150405.000000000")
+    ext:=safeExtension(originalName)
+    dir:=filepath.Join(m.Root,"tenants",tenantID,"datasets",datasetID,"imports",stamp)
+    if err:=os.MkdirAll(dir,0o750); err!=nil { return SavedDatasetImport{},err }
+    localPath:=filepath.Join(dir,"original"+ext)
+    file,err:=os.OpenFile(localPath,os.O_CREATE|os.O_WRONLY|os.O_EXCL,0o640)
+    if err!=nil { return SavedDatasetImport{},err }
+    hash:=sha256.New()
+    size,copyErr:=io.Copy(io.MultiWriter(file,hash),src)
+    closeErr:=file.Close()
+    if copyErr!=nil { _=os.Remove(localPath); return SavedDatasetImport{},copyErr }
+    if closeErr!=nil { return SavedDatasetImport{},closeErr }
+    digest:=hex.EncodeToString(hash.Sum(nil))
+    absolute,err:=filepath.Abs(localPath)
+    if err!=nil { return SavedDatasetImport{},err }
+
+    storageURI,err:=m.ArchiveFile(
+        context.Background(),absolute,
+        filepath.ToSlash(filepath.Join("tenants",tenantID,"datasets",datasetID,"imports",stamp,"original"+ext)),
+        contentTypeForExtension(ext),
+    )
+    if err!=nil { return SavedDatasetImport{},err }
+    return SavedDatasetImport{LocalPath:absolute,StorageURI:storageURI,SHA256:digest,Size:size},nil
 }
 
 func (m *Manager) SaveOriginal(tenantID,documentID,originalName string,src io.Reader)(SavedOriginal,error){
@@ -154,6 +189,8 @@ func contentTypeForExtension(ext string) string {
     case ".png": return "image/png"
     case ".jpg",".jpeg": return "image/jpeg"
     case ".tif",".tiff": return "image/tiff"
+    case ".csv": return "text/csv"
+    case ".xlsx": return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     default: return "application/octet-stream"
     }
 }

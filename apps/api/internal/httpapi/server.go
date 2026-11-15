@@ -61,6 +61,7 @@ func New(st *store.Store, fs *storage.Manager, q *queue.Publisher, defaultTenant
     mux.HandleFunc("GET /api/v1/datasets/{id}", s.getDataset)
     mux.HandleFunc("POST /api/v1/datasets/{id}/import", s.importDataset)
     mux.HandleFunc("GET /api/v1/datasets/{id}/records", s.listDatasetRecords)
+    mux.HandleFunc("GET /api/v1/datasets/{id}/imports", s.listDatasetImports)
     mux.HandleFunc("POST /api/v1/reconciliation-runs", s.createReconciliationRun)
     mux.HandleFunc("GET /api/v1/reconciliation-runs/{id}", s.getReconciliationRun)
     mux.HandleFunc("POST /api/v1/reconciliation-runs/{id}/cancel", s.cancelReconciliationRun)
