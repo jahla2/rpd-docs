@@ -75,7 +75,6 @@ jobs:
           test -f /tmp/rpd-pdf-out/page-001-bbox.html
           test -f /tmp/rpd-pdf-out/page-002-bbox.html
 
-
   database:
     runs-on: ubuntu-latest
     services:
@@ -158,7 +157,6 @@ jobs:
           \endif
           SQL
 
-
   quality:
     runs-on: ubuntu-latest
     steps:
@@ -175,9 +173,16 @@ jobs:
             --min-field-accuracy 0.95 \
             --min-line-accuracy 0.95 \
             --min-reconciliation-f1 0.95
+      - name: Classification precision/recall/F1 smoke
+        run: |
+          python benchmarks/classification_evaluate.py benchmarks/fixtures/classification_smoke.jsonl \
+            --backend rules \
+            --min-accuracy 1.0 \
+            --min-macro-f1 1.0 \
+            --min-covered-accuracy 1.0 \
+            --max-review-rate 0.08
       - name: Reconciliation microbenchmarks
         run: go test ./apps/api/internal/reconciliation -run '^$' -bench 'Benchmark(Match|FindAmountCombination)$' -benchtime=100x
-
 
   storage:
     runs-on: ubuntu-latest
@@ -244,4 +249,3 @@ jobs:
       - name: Stop test stack
         if: always()
         run: docker compose down -v --remove-orphans
-

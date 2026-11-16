@@ -1,0 +1,13 @@
+{"id":"invoice-001","expected_type":"invoice","text":"TAX INVOICE\nInvoice Number INV-001\nInvoice Date 2026-11-16\nSubtotal 1000.00\nVAT 120.00\nGrand Total 1120.00"}
+{"id":"purchase-order-001","expected_type":"purchase_order","text":"PURCHASE ORDER\nPO Number PO-1001\nOrder Date 2026-11-16\nShip To Main Warehouse\nOrdered By Procurement"}
+{"id":"credit-note-001","expected_type":"credit_note","text":"CREDIT NOTE\nCredit Amount 250.00\nAmount Credited to Account"}
+{"id":"debit-note-001","expected_type":"debit_note","text":"DEBIT NOTE\nDebit Amount 75.00\nAmount Debited to Account"}
+{"id":"receipt-001","expected_type":"receipt","text":"OFFICIAL RECEIPT\nReceipt No OR-7788\nAmount Tendered 500.00\nChange Due 20.00"}
+{"id":"bank-statement-001","expected_type":"bank_statement","text":"BANK STATEMENT\nStatement Period 01/11/2026 - 30/11/2026\nOpening Balance 1000.00\nClosing Balance 1250.00\nAccount Number 001122"}
+{"id":"supplier-statement-001","expected_type":"supplier_statement","text":"STATEMENT OF ACCOUNT\nPrevious Balance 5000.00\nBalance Brought Forward 5000.00\nCurrent Balance 4200.00"}
+{"id":"payment-advice-001","expected_type":"payment_advice","text":"REMITTANCE ADVICE\nPayment Reference PAY-900\nBeneficiary ABC Trading\nAmount Remitted 12500.00"}
+{"id":"delivery-receipt-001","expected_type":"delivery_receipt","text":"DELIVERY RECEIPT\nDelivery Date 2026-11-16\nDelivered To Main Warehouse\nReceived By Storekeeper"}
+{"id":"grn-001","expected_type":"goods_received_note","text":"GOODS RECEIVED NOTE\nGRN Number GRN-441\nReceived Quantity 24\nGoods Received in Good Condition"}
+{"id":"erp-export-001","expected_type":"erp_export","text":"ERP EXPORT\nCompany Code 1000\nPosting Date 2026-11-16\nDocument Number 190001\nFiscal Year 2026"}
+{"id":"spreadsheet-001","expected_type":"spreadsheet","text":"Business Spreadsheet\nWorksheet AP November\nSupplier Reference Amount Currency"}
+{"id":"unknown-001","expected_type":"unknown","text":"Internal operations memo\nReference 12345\nPrepared for monthly management review"}
