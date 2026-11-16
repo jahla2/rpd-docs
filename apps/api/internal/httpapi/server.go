@@ -98,6 +98,7 @@ func New(st *store.Store, fs *storage.Manager, q *queue.Publisher, defaultTenant
     mux.HandleFunc("GET /api/v1/mapping-templates", s.listMappingTemplates)
     mux.HandleFunc("POST /api/v1/mapping-templates", s.createMappingTemplate)
     mux.HandleFunc("GET /api/v1/mapping-templates/{id}", s.getMappingTemplate)
+    mux.HandleFunc("POST /api/v1/mapping-templates/{id}/preview", s.previewMappingTemplate)
     mux.HandleFunc("POST /api/v1/mapping-templates/{id}/versions", s.createMappingTemplateVersion)
     mux.HandleFunc("POST /api/v1/mapping-templates/{id}/activate", s.activateMappingTemplate)
     mux.HandleFunc("POST /api/v1/datasets", s.createDataset)
