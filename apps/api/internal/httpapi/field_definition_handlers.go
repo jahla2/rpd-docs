@@ -10,32 +10,8 @@ import (
     "github.com/jahla2/rpd-docs/apps/api/internal/store"
 )
 
-var fieldNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}package httpapi
-
-import (
-    "encoding/json"
-    "errors"
-    "net/http"
-    "regexp"
-    "strings"
-
-    "github.com/jahla2/rpd-docs/apps/api/internal/store"
-)
-
-)
-var fieldDefinitionUUIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}package httpapi
-
-import (
-    "encoding/json"
-    "errors"
-    "net/http"
-    "regexp"
-    "strings"
-
-    "github.com/jahla2/rpd-docs/apps/api/internal/store"
-)
-
-)
+var fieldNamePattern = regexp.MustCompile("^[a-z][a-z0-9_]{0,63}$")
+var fieldDefinitionUUIDPattern = regexp.MustCompile("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$")
 
 var allowedFieldDataTypes = map[string]bool{
     "string": true,
