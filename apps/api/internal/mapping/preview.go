@@ -91,17 +91,38 @@ func PreviewTemplate(config TemplateConfig, headers []string, samples map[string
         rowCount = 20
     }
 
+    normalizedHeaders:=map[string]bool{}
+    for _,header:=range headers { normalizedHeaders[NormalizeHeader(header)]=true }
+    for _,rule:=range config.Columns {
+        for _,operation:=range rule.Operations {
+            if operation.Operation!="combine" { continue }
+            aliases,ok:=combineAliases(operation.Config["with"])
+            if !ok { continue }
+            for _,alias:=range aliases {
+                if !normalizedHeaders[NormalizeHeader(alias)] {
+                    preview.ValidationErrors=append(
+                        preview.ValidationErrors,
+                        fmt.Sprintf("target %q combine source %q was not found",rule.Target,alias),
+                    )
+                }
+            }
+        }
+    }
+
     for rowIndex := 0; rowIndex < rowCount; rowIndex++ {
         row := make(map[string]string)
+        context:=make(map[string]string,len(headers))
+        for _,header:=range headers {
+            value:=""
+            if values:=samples[header]; rowIndex<len(values) { value=values[rowIndex] }
+            context[NormalizeHeader(header)]=strings.TrimSpace(value)
+        }
+
         for ruleIndex, headerIndex := range matchedRules {
             rule := config.Columns[ruleIndex]
             header := headers[headerIndex]
-            value := ""
-            if values := samples[header]; rowIndex < len(values) {
-                value = values[rowIndex]
-            }
-            value = strings.TrimSpace(value)
-            transformed, excluded := ApplyOperations(value, rule.Operations)
+            value := context[NormalizeHeader(header)]
+            transformed, excluded := ApplyOperationsWithContext(value, rule.Operations, context)
             if excluded || transformed == nil {
                 continue
             }
@@ -119,6 +140,10 @@ func PreviewTemplate(config TemplateConfig, headers []string, samples map[string
 }
 
 func ApplyOperations(value string, operations []Transform) (*string, bool) {
+    return ApplyOperationsWithContext(value,operations,nil)
+}
+
+func ApplyOperationsWithContext(value string, operations []Transform, context map[string]string) (*string, bool) {
     current := value
     excluded := false
 
@@ -170,6 +195,31 @@ func ApplyOperations(value string, operations []Transform) (*string, bool) {
                 trim=parsed
             }
             if trim { current=strings.TrimSpace(current) }
+        case "combine":
+            aliases,ok:=combineAliases(operation.Config["with"])
+            if !ok { return nil,false }
+            separator:=" "
+            if rawSeparator,exists:=operation.Config["separator"]; exists {
+                parsed,ok:=rawSeparator.(string)
+                if !ok || len(parsed)>16 { return nil,false }
+                separator=parsed
+            }
+            skipEmpty:=false
+            if rawSkip,exists:=operation.Config["skip_empty"]; exists {
+                parsed,ok:=rawSkip.(bool)
+                if !ok { return nil,false }
+                skipEmpty=parsed
+            }
+            parts:=[]string{current}
+            for _,alias:=range aliases {
+                additional,exists:=context[NormalizeHeader(alias)]
+                if !exists || strings.TrimSpace(additional)=="" {
+                    if skipEmpty { continue }
+                    return nil,false
+                }
+                parts=append(parts,strings.TrimSpace(additional))
+            }
+            current=strings.Join(parts,separator)
         }
     }
 
@@ -229,4 +279,24 @@ func splitIndex(raw any)(int,bool){
         if value>=0 && value<=31 && value==float64(int(value)) { return int(value),true }
     }
     return 0,false
+}
+
+
+func combineAliases(raw any)([]string,bool){
+    switch values:=raw.(type) {
+    case []string:
+        if len(values)==0 || len(values)>8 { return nil,false }
+        return values,true
+    case []any:
+        if len(values)==0 || len(values)>8 { return nil,false }
+        out:=make([]string,0,len(values))
+        for _,value:=range values {
+            alias,ok:=value.(string)
+            if !ok || NormalizeHeader(alias)=="" { return nil,false }
+            out=append(out,strings.TrimSpace(alias))
+        }
+        return out,true
+    default:
+        return nil,false
+    }
 }
