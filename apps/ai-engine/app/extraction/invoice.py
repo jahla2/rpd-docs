@@ -149,6 +149,29 @@ def _apply_operations(value: str, operations: list[dict]) -> tuple[str | None, b
             current = normalize_decimal(current)
         elif name == "date" and current is not None:
             current = normalize_date(current)
+        elif name == "split" and current is not None:
+            delimiter = config.get("delimiter")
+            index = config.get("index")
+            trim = config.get("trim", True)
+            if (
+                not isinstance(delimiter, str)
+                or not delimiter
+                or len(delimiter.encode("utf-8")) > 16
+                or not isinstance(index, int)
+                or isinstance(index, bool)
+                or index < 0
+                or index > 31
+                or not isinstance(trim, bool)
+            ):
+                current = None
+                continue
+            parts = current.split(delimiter)
+            if index >= len(parts):
+                current = None
+                continue
+            current = parts[index]
+            if trim:
+                current = current.strip()
     return current, excluded
 
 
