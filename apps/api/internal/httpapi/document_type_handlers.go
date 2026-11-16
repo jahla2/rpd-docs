@@ -2,6 +2,7 @@ package httpapi
 
 import (
     "encoding/json"
+    "errors"
     "net/http"
     "strings"
 
@@ -133,6 +134,10 @@ func (s *Server) updateDocumentType(w http.ResponseWriter, r *http.Request) {
     }
     if store.IsDocumentTypeConflict(err) {
         writeError(w, http.StatusConflict, "DOCUMENT_TYPE_EXISTS", "document type code and schema version already exist")
+        return
+    }
+    if errors.Is(err, store.ErrDocumentTypeIdentityImmutable) {
+        writeError(w, http.StatusConflict, "DOCUMENT_TYPE_IDENTITY_IMMUTABLE", "code and schema_version cannot be changed after creation")
         return
     }
     if err != nil {
