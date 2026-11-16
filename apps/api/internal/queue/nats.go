@@ -74,11 +74,19 @@ func ensureStream(js nats.JetStreamContext) error {
 }
 
 func (p *Publisher) Publish(subject string, msg JobMessage) error {
-    return p.PublishJSON(subject,msg)
+    payload,err:=json.Marshal(msg)
+    if err!=nil { return err }
+    dedupeKey:=msg.JobID+":"+msg.RunID+":"+msg.Step
+    _,err=p.js.Publish(subject,payload,nats.MsgId(dedupeKey))
+    return err
 }
 
 func (p *Publisher) PublishReconciliation(msg ReconciliationJobMessage) error {
-    return p.PublishJSON("reconciliation.run",msg)
+    payload,err:=json.Marshal(msg)
+    if err!=nil { return err }
+    dedupeKey:="reconciliation:"+msg.RunID
+    _,err=p.js.Publish("reconciliation.run",payload,nats.MsgId(dedupeKey))
+    return err
 }
 
 func (p *Publisher) PublishJSON(subject string,msg any) error {
