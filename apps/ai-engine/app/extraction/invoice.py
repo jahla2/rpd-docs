@@ -213,6 +213,12 @@ def extract_line_items(table_html: str | None, mapping_config: dict | None = Non
             transformed, excluded = _apply_operations(value, operations)
             if excluded:
                 continue
+            strict_split = any(
+                str(operation.get("operation", "")).strip().lower() == "split"
+                for operation in operations
+            )
+            if strict_split and transformed is None:
+                continue
 
             if target in {"quantity", "unit_price", "tax", "line_total"} and not operations:
                 normalized = normalize_decimal(value)
@@ -307,12 +313,19 @@ def _search_alias(
             if not match:
                 continue
             raw_value = match.group(1).strip()
+            operations = list(rule.get("operations") or [])
             transformed, excluded = _apply_operations(
                 raw_value,
-                list(rule.get("operations") or []),
+                operations,
             )
             if excluded:
                 return None
+            strict_split = any(
+                str(operation.get("operation", "")).strip().lower() == "split"
+                for operation in operations
+            )
+            if strict_split and transformed is None:
+                continue
             value = transformed
             if value is None:
                 value = normalizer(raw_value) if normalizer else raw_value
