@@ -197,6 +197,51 @@ def main() -> None:
         if fetched_document_type.get("code") != "receipt":
             raise AssertionError(f"unexpected document type: {fetched_document_type}")
 
+        field_definition = api(
+            "POST",
+            "/api/v1/field-definitions",
+            json={
+                "document_type_id": document_type_id,
+                "field_name": "receipt_number",
+                "display_name": "Receipt Number",
+                "data_type": "identifier",
+                "required": True,
+                "repeating": False,
+            },
+        ).json()
+        field_definition_id = field_definition["id"]
+
+        field_definitions = api(
+            "GET",
+            f"/api/v1/field-definitions?document_type_id={document_type_id}",
+        ).json().get("items") or []
+        if field_definition_id not in {item.get("id") for item in field_definitions}:
+            raise AssertionError(f"field definition missing from list: {field_definitions}")
+
+        updated_field_definition = api(
+            "PUT",
+            f"/api/v1/field-definitions/{field_definition_id}",
+            json={
+                "document_type_id": document_type_id,
+                "field_name": "receipt_number",
+                "display_name": "Receipt Reference",
+                "data_type": "identifier",
+                "required": True,
+                "repeating": False,
+            },
+        ).json()
+        if updated_field_definition.get("display_name") != "Receipt Reference":
+            raise AssertionError(f"field definition update failed: {updated_field_definition}")
+
+        delete_field_definition = api(
+            "DELETE",
+            f"/api/v1/field-definitions/{field_definition_id}",
+        )
+        if delete_field_definition.status_code != 204:
+            raise AssertionError(
+                f"field definition delete failed: {delete_field_definition.status_code}"
+            )
+
         updated_document_type = api(
             "PUT",
             f"/api/v1/document-types/{document_type_id}",
