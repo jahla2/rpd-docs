@@ -10,7 +10,32 @@ import (
     "github.com/jahla2/rpd-docs/apps/api/internal/store"
 )
 
-var fieldNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
+var fieldNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}package httpapi
+
+import (
+    "encoding/json"
+    "errors"
+    "net/http"
+    "regexp"
+    "strings"
+
+    "github.com/jahla2/rpd-docs/apps/api/internal/store"
+)
+
+)
+var fieldDefinitionUUIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}package httpapi
+
+import (
+    "encoding/json"
+    "errors"
+    "net/http"
+    "regexp"
+    "strings"
+
+    "github.com/jahla2/rpd-docs/apps/api/internal/store"
+)
+
+)
 
 var allowedFieldDataTypes = map[string]bool{
     "string": true,
@@ -41,6 +66,9 @@ func validateFieldDefinitionRequest(req fieldDefinitionRequest) (fieldDefinition
     if req.DocumentTypeID == "" {
         return fieldDefinitionRequest{}, "document_type_id is required"
     }
+    if !fieldDefinitionUUIDPattern.MatchString(req.DocumentTypeID) {
+        return fieldDefinitionRequest{}, "document_type_id must be a valid UUID"
+    }
 
     req.FieldName = strings.ToLower(strings.TrimSpace(req.FieldName))
     req.FieldName = strings.ReplaceAll(req.FieldName, "-", "_")
@@ -63,10 +91,15 @@ func validateFieldDefinitionRequest(req fieldDefinitionRequest) (fieldDefinition
 }
 
 func (s *Server) listFieldDefinitions(w http.ResponseWriter, r *http.Request) {
+    documentTypeID := strings.TrimSpace(r.URL.Query().Get("document_type_id"))
+    if documentTypeID != "" && !fieldDefinitionUUIDPattern.MatchString(documentTypeID) {
+        writeError(w, http.StatusBadRequest, "INVALID_DOCUMENT_TYPE_ID", "document_type_id must be a valid UUID")
+        return
+    }
     items, err := s.store.ListFieldDefinitions(
         r.Context(),
         tenantFrom(r, s.defaultTenantID),
-        strings.TrimSpace(r.URL.Query().Get("document_type_id")),
+        documentTypeID,
     )
     if err != nil {
         writeError(w, http.StatusInternalServerError, "DATABASE_FAILED", "failed to list field definitions")
