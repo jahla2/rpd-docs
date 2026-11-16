@@ -65,3 +65,41 @@ def test_split_operation_applies_to_document_field_alias():
         config,
     )
     assert result["invoice_number"]["value"] == "001"
+
+
+
+def test_combine_operation_applies_to_document_field_aliases():
+    config = {
+        "columns": [
+            {
+                "source_aliases": ["Vendor First"],
+                "target": "supplier_name",
+                "type": "string",
+                "operations": [
+                    {
+                        "operation": "combine",
+                        "config": {
+                            "with": ["Vendor Last"],
+                            "separator": " ",
+                            "skip_empty": False,
+                        },
+                    }
+                ],
+            }
+        ]
+    }
+    blocks = [
+        {"block_id": "b1", "text": "Vendor First: ABC", "bbox": box(), "confidence": 1.0},
+        {"block_id": "b2", "text": "Vendor Last: Trading", "bbox": box(), "confidence": 1.0},
+        {"block_id": "b3", "text": "Invoice Number: INV-001", "bbox": box(), "confidence": 1.0},
+        {"block_id": "b4", "text": "Invoice Date: 2026-11-16", "bbox": box(), "confidence": 1.0},
+        {"block_id": "b5", "text": "Currency: PHP", "bbox": box(), "confidence": 1.0},
+        {"block_id": "b6", "text": "Grand Total: 100.00", "bbox": box(), "confidence": 1.0},
+    ]
+    result = extract_invoice_document(
+        "doc-combine",
+        [{"page": 1, "ocr_blocks": blocks, "table_html": None}],
+        config,
+    )
+    assert result["supplier_name"]["value"] == "ABC Trading"
+    assert result["requires_review"] is False
