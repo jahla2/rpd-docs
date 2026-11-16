@@ -148,22 +148,35 @@ func (s *Server) upload(w http.ResponseWriter,r *http.Request) {
         s.logger.Error("store original","error",err,"document_id",documentID)
         writeError(w,http.StatusInternalServerError,"STORAGE_FAILED","failed to store original"); return
     }
-    if err := s.store.CreateDocumentAndJob(r.Context(),store.CreateDocumentParams{
-        DocumentID:documentID,TenantID:tenantID,OriginalName:filepath.Base(header.Filename),
-        MimeType:mimeType,SHA256:saved.SHA256,StorageURI:saved.StorageURI,JobID:jobID,RunID:runID,
-    }); err != nil {
-        s.logger.Error("create document","error",err,"document_id",documentID)
-        writeError(w,http.StatusInternalServerError,"DATABASE_FAILED","failed to create document"); return
-    }
+
     if saved.StorageURI!=saved.Path { options["source_uri"]=saved.StorageURI }
     msg := queue.JobMessage{
         SchemaVersion:"1.0",JobID:jobID,TenantID:tenantID,DocumentID:documentID,
         RunID:runID,Step:"PREPROCESS",InputArtifact:saved.Path,Options:options,
     }
-    if err := s.queue.Publish("document.preprocess",msg); err != nil {
-        s.logger.Error("publish preprocess","error",err,"document_id",documentID,"job_id",jobID)
-        writeError(w,http.StatusServiceUnavailable,"QUEUE_FAILED","document stored but job could not be queued"); return
+    payload,err:=json.Marshal(msg)
+    if err!=nil {
+        writeError(w,http.StatusInternalServerError,"QUEUE_FAILED","failed to serialize processing job"); return
     }
+    messageKey:=jobID+":"+runID+":PREPROCESS"
+
+    if err := s.store.CreateDocumentAndJob(r.Context(),store.CreateDocumentParams{
+        DocumentID:documentID,TenantID:tenantID,OriginalName:filepath.Base(header.Filename),
+        MimeType:mimeType,SHA256:saved.SHA256,StorageURI:saved.StorageURI,JobID:jobID,RunID:runID,
+        OutboxSubject:"document.preprocess",OutboxMessageKey:messageKey,OutboxPayload:payload,
+    }); err != nil {
+        s.logger.Error("create document","error",err,"document_id",documentID)
+        writeError(w,http.StatusInternalServerError,"DATABASE_FAILED","failed to create document"); return
+    }
+
+    // Best-effort immediate delivery keeps normal uploads fast. The transactional
+    // outbox remains authoritative and retries delivery if NATS is unavailable.
+    if err := s.queue.PublishRaw("document.preprocess",payload,messageKey); err != nil {
+        s.logger.Warn("publish preprocess deferred to outbox","error",err,"document_id",documentID,"job_id",jobID)
+    } else if err:=s.store.MarkOutboxPublishedByKey(r.Context(),messageKey); err!=nil {
+        s.logger.Warn("mark outbox published failed","error",err,"document_id",documentID,"job_id",jobID)
+    }
+
     writeJSON(w,http.StatusAccepted,map[string]any{
         "document_id":documentID,"job_id":jobID,"run_id":runID,"status":"QUEUED","sha256":saved.SHA256,
     })
