@@ -4,7 +4,7 @@ import "testing"
 
 func TestValidateFieldDefinitionRequest(t *testing.T) {
     got, validationError := validateFieldDefinitionRequest(fieldDefinitionRequest{
-        DocumentTypeID: "00000000-0000-0000-0000-000000000001",
+        DocumentTypeID: "123e4567-e89b-42d3-a456-426614174000",
         FieldName: "Invoice Number",
         DisplayName: "Invoice Number",
         DataType: "IDENTIFIER",
@@ -20,7 +20,7 @@ func TestValidateFieldDefinitionRequest(t *testing.T) {
 
 func TestValidateFieldDefinitionRequestRejectsUnsafeNameAndType(t *testing.T) {
     _, validationError := validateFieldDefinitionRequest(fieldDefinitionRequest{
-        DocumentTypeID: "00000000-0000-0000-0000-000000000001",
+        DocumentTypeID: "123e4567-e89b-42d3-a456-426614174000",
         FieldName: "../invoice",
         DisplayName: "Invoice",
         DataType: "shell",
@@ -30,7 +30,7 @@ func TestValidateFieldDefinitionRequestRejectsUnsafeNameAndType(t *testing.T) {
     }
 
     _, validationError = validateFieldDefinitionRequest(fieldDefinitionRequest{
-        DocumentTypeID: "00000000-0000-0000-0000-000000000001",
+        DocumentTypeID: "123e4567-e89b-42d3-a456-426614174000",
         FieldName: "invoice_number",
         DisplayName: "Invoice",
         DataType: "shell",
