@@ -143,7 +143,7 @@ func (s *Store) PendingReconciliationItems(ctx context.Context,tenantID,runID st
     rows,err:=s.pool.Query(ctx,`
       SELECT id::text,document_id::text,status,attempt_count,last_error,started_at,completed_at
       FROM reconciliation_run_items
-      WHERE tenant_id=$1 AND reconciliation_run_id=$2 AND status IN ('QUEUED','RETRY')
+      WHERE tenant_id=$1 AND reconciliation_run_id=$2 AND status IN ('QUEUED','RETRY','RUNNING')
       ORDER BY created_at,id
     `,tenantID,runID)
     if err!=nil { return nil,err }
@@ -249,6 +249,20 @@ func (s *Store) CancelReconciliationRun(ctx context.Context,tenantID,runID strin
     `,tenantID,runID); err!=nil { return err }
     if err=tx.Commit(ctx); err!=nil { return err }
     return s.AddReconciliationEvent(ctx,tenantID,runID,"run.cancelled","CANCELLED",100,nil,nil)
+}
+
+func (s *Store) RetryReconciliationRun(ctx context.Context,tenantID,runID string,cause error) error {
+    message:=""
+    if cause!=nil { message=cause.Error() }
+    _,err:=s.pool.Exec(ctx,`
+      UPDATE reconciliation_runs
+      SET status='RETRYING',failed_at=NULL,completed_at=NULL,updated_at=now()
+      WHERE tenant_id=$1 AND id=$2
+    `,tenantID,runID)
+    if err!=nil { return err }
+    return s.AddReconciliationEvent(ctx,tenantID,runID,"run.retrying","RETRYING",0,nil,map[string]any{
+        "error":message,
+    })
 }
 
 func (s *Store) FailReconciliationRun(ctx context.Context,tenantID,runID string,cause error) error {
