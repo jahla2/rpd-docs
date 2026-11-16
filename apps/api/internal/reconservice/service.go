@@ -41,6 +41,11 @@ func (s *Service) ExecuteQueuedRun(ctx context.Context,tenantID,runID string) er
     state,err:=s.Store.GetReconciliationRunState(ctx,tenantID,runID)
     if err!=nil { return err }
 
+    switch state.Run.Status {
+    case "COMPLETED","COMPLETED_WITH_EXCEPTIONS","CANCELLED","FAILED":
+        return nil
+    }
+
     var cfg Config
     if err:=json.Unmarshal(state.Config,&cfg); err!=nil { return fmt.Errorf("decode reconciliation config: %w",err) }
     if cfg.AbsoluteTolerance=="" { cfg.AbsoluteTolerance="0.01" }
