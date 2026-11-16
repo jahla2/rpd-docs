@@ -17,8 +17,10 @@ The first complete workflow is:
 Upload scanned invoice PDF
 → immutable storage
 → C++ preprocessing
-→ RapidOCR
-→ RapidTable/SLANet
+→ searchable-PDF text or RapidOCR
+→ fast document classification from reused OCR/text
+→ type routing
+→ RapidTable/SLANet when the selected route needs table structure
 → header detection
 → configurable mapping
 → canonical invoice JSON
@@ -40,7 +42,7 @@ C++ owns measured performance-sensitive work: PDF/image preprocessing, rotation,
 
 ### Python — document intelligence
 
-Python owns RapidOCR, RapidTable/SLANet, layout reconstruction, header detection experiments, semantic mapping suggestions, embeddings and agentic fallback. AI can suggest; deterministic validation remains authoritative.
+Python owns RapidOCR, bounded deterministic document classification, RapidTable/SLANet, layout reconstruction, header detection experiments, semantic mapping suggestions, embeddings and agentic fallback. Classification reuses OCR/text artifacts and must not trigger a second OCR pass. AI can suggest; deterministic validation remains authoritative.
 
 ## 3. Core principles
 
@@ -93,11 +95,12 @@ Go API ───────► PostgreSQL
 ```text
 RECEIVED
 QUEUED
-CLASSIFIED
 PREPROCESSING
 PREPROCESSED
 OCR_PROCESSING
 OCR_COMPLETED
+CLASSIFYING
+CLASSIFIED
 TABLE_PROCESSING
 TABLES_COMPLETED
 LAYOUT_PROCESSING
@@ -601,7 +604,14 @@ Non-goals for MVP: Kubernetes, dozens of microservices, fully autonomous financi
 - [x] immutable document reprocessing with a new run/version
 - [x] canonical fields, line items and validation records persisted in PostgreSQL
 - [x] per-page OCR run provenance persisted
-- [x] granular PREPROCESS/OCR/TABLE/MAPPING/VALIDATION/FINALIZE job-step API
+- [x] granular PREPROCESS/OCR/CLASSIFY/TABLE/MAPPING/VALIDATION/FINALIZE job-step API
+- [x] bounded deterministic document classifier with explicit-type override
+- [x] classification provenance artifact + PostgreSQL history
+- [x] non-invoice/unknown routing to review instead of invoice-by-default extraction
+- [x] classifier E2E assertions in the full Docker workflow
+- [ ] ModernBERT ONNX low-confidence classifier fallback
+- [ ] optional local Qwen/llama.cpp fallback behind a strict timeout
+- [ ] classification corpus with per-class precision/recall/F1 and p50/p95 latency
 - [x] dependency-aware readiness for PostgreSQL/storage/NATS/native/AI
 - [x] full Docker Compose runtime for API/orchestrator/reconciliation/AI/dependencies
 - [x] end-to-end CI: upload → canonical → duplicate/reprocess → ERP → reconciliation → export
@@ -617,16 +627,17 @@ Non-goals for MVP: Kubernetes, dozens of microservices, fully autonomous financi
 Build vertical slices:
 
 1. Upload → storage → queue → job status.
-2. Preprocess → OCR JSON.
-3. OCR → table → canonical invoice.
-4. Mapping → validation.
-5. ERP import → exact reconciliation.
-6. Tolerance → review → export.
-7. Agentic fallback.
+2. Preprocess → OCR/text JSON.
+3. OCR/text → fast classification → type routing.
+4. Invoice route → table → canonical invoice.
+5. Mapping → validation.
+6. ERP import → exact reconciliation.
+7. Tolerance → review → export.
+8. Agentic fallback.
 
 ## 18. Definition of MVP done
 
-A scanned invoice can be uploaded, stored immutably, preprocessed, OCR'd, table-extracted, mapped to canonical invoice JSON, validated, reconciled against imported ERP data, reviewed when uncertain, and exported with an auditable evidence trail.
+A scanned invoice can be uploaded, stored immutably, preprocessed, OCR'd, classified, routed to the invoice extractor, table-extracted, mapped to canonical invoice JSON, validated, reconciled against imported ERP data, reviewed when uncertain, and exported with an auditable evidence trail. Documents classified as unsupported or unknown are preserved and routed to review rather than being forced through invoice extraction.
 
 The reliable MVP path is now continuously exercised in CI through the full Docker Compose stack. The smoke test also verifies duplicate detection and immutable reprocessing before ERP reconciliation/export. Remaining unchecked work in this guide requires representative private data, production-like infrastructure, operational drills, or external security validation rather than additional core MVP business-flow code.
 
