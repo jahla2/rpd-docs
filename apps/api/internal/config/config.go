@@ -22,6 +22,8 @@ type Config struct {
     S3CreateBucket bool
     RateLimitRPS float64
     RateLimitBurst int
+    AIEngineURL string
+    NativeEnginePath string
 }
 
 func Load() Config {
@@ -42,6 +44,8 @@ func Load() Config {
         S3CreateBucket: boolValue("S3_CREATE_BUCKET", false),
         RateLimitRPS: floatValue("RATE_LIMIT_RPS",20),
         RateLimitBurst: intValue("RATE_LIMIT_BURST",40),
+        AIEngineURL: value("AI_ENGINE_URL","http://localhost:8000"),
+        NativeEnginePath: value("NATIVE_ENGINE_PATH","./build/native-engine/rpd-native-engine"),
     }
 }
 
