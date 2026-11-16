@@ -119,6 +119,7 @@ jobs:
           SELECT to_regclass('public.outbox_messages') IS NOT NULL AS outbox_messages_exists \gset
           SELECT to_regclass('public.ocr_runs') IS NOT NULL AS ocr_runs_exists \gset
           SELECT to_regclass('public.document_classifications') IS NOT NULL AS document_classifications_exists \gset
+          SELECT to_regclass('public.layout_profiles') IS NOT NULL AS layout_profiles_exists \gset
           \if :processing_pages_exists
           \else
             \quit 1
@@ -152,6 +153,10 @@ jobs:
             \quit 1
           \endif
           \if :document_classifications_exists
+          \else
+            \quit 1
+          \endif
+          \if :layout_profiles_exists
           \else
             \quit 1
           \endif
