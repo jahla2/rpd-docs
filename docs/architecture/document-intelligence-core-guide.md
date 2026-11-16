@@ -609,9 +609,13 @@ Non-goals for MVP: Kubernetes, dozens of microservices, fully autonomous financi
 - [x] classification provenance artifact + PostgreSQL history
 - [x] non-invoice/unknown routing to review instead of invoice-by-default extraction
 - [x] classifier E2E assertions in the full Docker workflow
-- [ ] ModernBERT ONNX low-confidence classifier fallback
+- [x] optional ModernBERT INT8 ONNX low-confidence classifier fallback with warm readiness
+- [x] strict 3-second classification deadline with unknown/review degradation
+- [x] reproducible external model download with exact revision manifest
+- [x] local classifier p50/p95 latency benchmark harness
+- [ ] benchmark ModernBERT on representative private documents and target deployment hardware
 - [ ] optional local Qwen/llama.cpp fallback behind a strict timeout
-- [ ] classification corpus with per-class precision/recall/F1 and p50/p95 latency
+- [ ] classification corpus with per-class precision/recall/F1
 - [x] dependency-aware readiness for PostgreSQL/storage/NATS/native/AI
 - [x] full Docker Compose runtime for API/orchestrator/reconciliation/AI/dependencies
 - [x] end-to-end CI: upload → canonical → duplicate/reprocess → ERP → reconciliation → export
