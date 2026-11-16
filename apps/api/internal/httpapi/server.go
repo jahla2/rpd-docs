@@ -22,6 +22,30 @@ import (
 
 const maxUploadBytes = 50 << 20
 
+var supportedDocumentTypes = map[string]struct{}{
+    "invoice":{},
+    "purchase_order":{},
+    "credit_note":{},
+    "debit_note":{},
+    "receipt":{},
+    "bank_statement":{},
+    "supplier_statement":{},
+    "payment_advice":{},
+    "delivery_receipt":{},
+    "goods_received_note":{},
+    "erp_export":{},
+    "spreadsheet":{},
+    "unknown":{},
+}
+
+func normalizeDocumentType(value string)(string,bool){
+    normalized:=strings.ToLower(strings.TrimSpace(value))
+    normalized=strings.ReplaceAll(normalized,"-","_")
+    normalized=strings.ReplaceAll(normalized," ","_")
+    _,ok:=supportedDocumentTypes[normalized]
+    return normalized,ok
+}
+
 type Server struct {
     store *store.Store
     storage *storage.Manager
@@ -41,6 +65,7 @@ type MappingPreviewRequest struct {
 
 type ReprocessRequest struct {
     MappingTemplateID string `json:"mapping_template_id,omitempty"`
+    DocumentType string `json:"document_type,omitempty"`
 }
 
 func New(st *store.Store, fs *storage.Manager, q *queue.Publisher, defaultTenantID,apiKeyPepper,aiEngineURL,nativeEnginePath string, logger *slog.Logger) http.Handler {
@@ -150,6 +175,13 @@ func (s *Server) upload(w http.ResponseWriter,r *http.Request) {
     tenantID := tenantFrom(r,s.defaultTenantID)
 
     options:=map[string]any{}
+    if rawType:=strings.TrimSpace(r.FormValue("document_type")); rawType!="" {
+        documentType,ok:=normalizeDocumentType(rawType)
+        if !ok {
+            writeError(w,http.StatusBadRequest,"INVALID_DOCUMENT_TYPE","unsupported document_type"); return
+        }
+        options["document_type"]=documentType
+    }
     if templateID:=strings.TrimSpace(r.FormValue("mapping_template_id")); templateID!="" {
         template,templateErr:=s.store.GetMappingTemplate(r.Context(),tenantID,templateID)
         if store.IsNotFound(templateErr) {
@@ -274,6 +306,13 @@ func (s *Server) reprocessDocument(w http.ResponseWriter,r *http.Request) {
     }
 
     options:=map[string]any{}
+    if rawType:=strings.TrimSpace(request.DocumentType); rawType!="" {
+        documentType,ok:=normalizeDocumentType(rawType)
+        if !ok {
+            writeError(w,http.StatusBadRequest,"INVALID_DOCUMENT_TYPE","unsupported document_type"); return
+        }
+        options["document_type"]=documentType
+    }
     if templateID:=strings.TrimSpace(request.MappingTemplateID); templateID!="" {
         template,templateErr:=s.store.GetMappingTemplate(r.Context(),tenantID,templateID)
         if store.IsNotFound(templateErr) {
