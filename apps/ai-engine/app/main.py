@@ -66,7 +66,7 @@ def ready() -> dict:
     rapidocr_available = importlib.util.find_spec("rapidocr") is not None
     rapidtable_available = importlib.util.find_spec("rapid_table") is not None
     return {
-        "ready": rapidocr_available,
+        "ready": rapidocr_available and rapidtable_available,
         "checks": {
             "rapidocr": rapidocr_available,
             "rapid_table": rapidtable_available,
