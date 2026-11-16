@@ -11,6 +11,7 @@ import (
 )
 
 var ErrDocumentTypeConflict = errors.New("document type already exists")
+var ErrDocumentTypeIdentityImmutable = errors.New("document type code and schema version are immutable")
 
 type DocumentType struct {
     ID            string    `json:"id"`
@@ -127,6 +128,9 @@ func (s *Store) UpdateDocumentType(
     )
     if err != nil {
         return DocumentType{}, err
+    }
+    if before.Code != code || before.SchemaVersion != schemaVersion {
+        return DocumentType{}, ErrDocumentTypeIdentityImmutable
     }
 
     var item DocumentType
