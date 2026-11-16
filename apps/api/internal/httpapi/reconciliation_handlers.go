@@ -65,11 +65,13 @@ func (s *Server) createReconciliationRun(w http.ResponseWriter,r *http.Request){
         writeError(w,http.StatusBadRequest,"RECONCILIATION_CREATE_FAILED",err.Error()); return
     }
 
-    if err:=s.queue.PublishReconciliation(queue.ReconciliationJobMessage{
+    message:=queue.ReconciliationJobMessage{
         SchemaVersion:"1.0",TenantID:tenantID,RunID:run.ID,
-    }); err!=nil {
-        _=s.store.FailReconciliationRun(r.Context(),tenantID,run.ID,err)
-        writeError(w,http.StatusServiceUnavailable,"QUEUE_FAILED","run was created but could not be queued"); return
+    }
+    if err:=s.queue.PublishReconciliation(message); err!=nil {
+        s.logger.Warn("reconciliation publish deferred to outbox","error",err,"run_id",run.ID)
+    } else if err:=s.store.MarkOutboxPublishedByKey(r.Context(),"reconciliation:"+run.ID); err!=nil {
+        s.logger.Warn("mark reconciliation outbox published failed","error",err,"run_id",run.ID)
     }
 
     writeJSON(w,http.StatusAccepted,map[string]any{
