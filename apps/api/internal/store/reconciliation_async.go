@@ -83,7 +83,7 @@ func (s *Store) CreateQueuedReconciliationRun(
     if _,err=tx.Exec(ctx,`
       INSERT INTO reconciliation_events
         (tenant_id,reconciliation_run_id,event_type,status,progress,data_json)
-      VALUES ($1,$2,'run.queued','QUEUED',0,jsonb_build_object('document_count',$3))
+      VALUES ($1,$2,'run.queued','QUEUED',0,jsonb_build_object('document_count',$3::integer))
     `,tenantID,r.ID,len(documentIDs)); err!=nil {
         return ReconciliationRun{},err
     }
