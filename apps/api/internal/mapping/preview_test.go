@@ -124,3 +124,46 @@ func TestApplyOperationsSplitMissingPartFailsClosed(t *testing.T){
     if excluded { t.Fatal("split should not mark excluded") }
     if value!=nil { t.Fatalf("value=%q",*value) }
 }
+
+
+func TestPreviewTemplateSplitFeedsMultipleTargets(t *testing.T){
+    raw:=json.RawMessage(`{
+      "columns":[
+        {
+          "source_aliases":["Composite Ref"],
+          "target":"supplier_code",
+          "type":"identifier",
+          "required":true,
+          "operations":[
+            {"operation":"split","config":{"delimiter":"-","index":0}}
+          ]
+        },
+        {
+          "source_aliases":["Composite Ref"],
+          "target":"invoice_number",
+          "type":"identifier",
+          "required":true,
+          "operations":[
+            {"operation":"split","config":{"delimiter":"-","index":1}}
+          ]
+        }
+      ]
+    }`)
+    config,err:=ValidateTemplateConfig(raw)
+    if err!=nil { t.Fatal(err) }
+
+    preview:=PreviewTemplate(
+        config,
+        []string{"Composite Ref"},
+        map[string][]string{"Composite Ref":{"SUP001-INV100"}},
+    )
+    if len(preview.ValidationErrors)!=0 { t.Fatalf("errors=%v",preview.ValidationErrors) }
+    if preview.Confidence!=1 { t.Fatalf("confidence=%v",preview.Confidence) }
+    row:=preview.SampleTransformedRows[0]
+    if row["supplier_code"]!="SUP001" || row["invoice_number"]!="INV100" {
+        t.Fatalf("row=%v",row)
+    }
+    if len(preview.Suggestions)!=1 || len(preview.Suggestions[0].Targets)!=2 {
+        t.Fatalf("suggestions=%v",preview.Suggestions)
+    }
+}
