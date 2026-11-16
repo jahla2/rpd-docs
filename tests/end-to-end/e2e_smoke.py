@@ -38,6 +38,21 @@ def wait_for_job(job_id: str) -> dict:
     raise TimeoutError(f"document job {job_id} did not finish: {last}")
 
 
+def wait_for_document_status(job_id: str, expected_status: str) -> dict:
+    deadline = time.time() + TIMEOUT_SECONDS
+    last = {}
+    terminal = {"READY_FOR_RECONCILIATION", "COMPLETED", "REVIEW_REQUIRED", "FAILED", "CANCELLED"}
+    while time.time() < deadline:
+        last = api("GET", f"/api/v1/jobs/{job_id}").json()
+        status = last.get("status")
+        if status in terminal:
+            if status != expected_status:
+                raise RuntimeError(f"document job ended in {status}, expected {expected_status}: {last}")
+            return last
+        time.sleep(1)
+    raise TimeoutError(f"document job {job_id} did not finish: {last}")
+
+
 def wait_for_reconciliation(run_id: str) -> dict:
     deadline = time.time() + TIMEOUT_SECONDS
     last = {}
@@ -75,6 +90,33 @@ def build_invoice(path: Path) -> None:
     pdf.drawString(310, y - 30, "2")
     pdf.drawString(380, y - 30, "500.00")
     pdf.drawString(465, y - 30, "1000.00")
+    pdf.line(72, y - 40, 520, y - 40)
+    pdf.save()
+
+
+def build_supplier_statement(path: Path) -> None:
+    pdf = canvas.Canvas(str(path))
+    pdf.setFont("Helvetica-Bold", 16)
+    pdf.drawString(72, 760, "Statement of Account")
+    pdf.setFont("Helvetica", 11)
+    pdf.drawString(72, 730, "Supplier: ABC Trading")
+    pdf.drawString(72, 710, "Statement Date: 2026-11-30")
+    pdf.drawString(72, 690, "Currency: PHP")
+    pdf.drawString(72, 670, "Previous Balance: 5000.00")
+    pdf.drawString(72, 650, "Current Balance: 6500.00")
+
+    y = 590
+    pdf.line(72, y + 20, 520, y + 20)
+    pdf.drawString(78, y, "Date")
+    pdf.drawString(180, y, "Invoice No")
+    pdf.drawString(290, y, "Debit")
+    pdf.drawString(370, y, "Credit")
+    pdf.drawString(450, y, "Balance")
+    pdf.line(72, y - 8, 520, y - 8)
+    pdf.drawString(78, y - 30, "2026-11-10")
+    pdf.drawString(180, y - 30, "INV-009")
+    pdf.drawString(290, y - 30, "1500.00")
+    pdf.drawString(450, y - 30, "6500.00")
     pdf.line(72, y - 40, 520, y - 40)
     pdf.save()
 
@@ -201,6 +243,53 @@ def main() -> None:
         if not any(item.get("artifact_type") == "CLASSIFICATION_JSON" for item in artifacts):
             raise AssertionError(f"classification artifact missing: {artifacts}")
 
+        # A supplier statement must auto-classify and use the statement schema,
+        # not the invoice extractor. No document_type hint is supplied.
+        statement_path = tmp_path / "supplier-statement.pdf"
+        build_supplier_statement(statement_path)
+        with statement_path.open("rb") as handle:
+            statement_upload = api(
+                "POST",
+                "/api/v1/documents",
+                files={"file": ("supplier-statement.pdf", handle, "application/pdf")},
+            ).json()
+
+        statement_document_id = statement_upload["document_id"]
+        statement_job_id = statement_upload["job_id"]
+        wait_for_document_status(statement_job_id, "COMPLETED")
+
+        statement_document = api(
+            "GET",
+            f"/api/v1/documents/{statement_document_id}",
+        ).json()
+        if statement_document.get("document_type") != "supplier_statement":
+            raise AssertionError(f"statement was not auto-routed: {statement_document}")
+
+        statement_result = api(
+            "GET",
+            f"/api/v1/documents/{statement_document_id}/result",
+        ).json()
+        statement_fields = statement_result.get("fields") or {}
+        supplier_name = ((statement_fields.get("supplier_name") or {}).get("value") or "").strip()
+        closing_balance = ((statement_fields.get("closing_balance") or {}).get("value") or "").strip()
+        statement_date = ((statement_fields.get("statement_date") or {}).get("value") or "").strip()
+        if supplier_name != "ABC Trading":
+            raise AssertionError(f"unexpected statement supplier: {supplier_name!r}")
+        if closing_balance != "6500.00":
+            raise AssertionError(f"unexpected statement closing balance: {closing_balance!r}")
+        if statement_date != "2026-11-30":
+            raise AssertionError(f"unexpected statement date: {statement_date!r}")
+
+        statement_steps = api(
+            "GET",
+            f"/api/v1/jobs/{statement_job_id}/steps",
+        ).json().get("items") or []
+        if not any(
+            step.get("step_name") == "CLASSIFY" and step.get("status") == "COMPLETED"
+            for step in statement_steps
+        ):
+            raise AssertionError(f"statement classification step missing: {statement_steps}")
+
         print(
             json.dumps(
                 {
@@ -210,6 +299,9 @@ def main() -> None:
                     "dataset_id": dataset_id,
                     "reconciliation_run_id": run_id,
                     "match_count": len(matches),
+                    "statement_document_id": statement_document_id,
+                    "statement_job_id": statement_job_id,
+                    "statement_type": statement_document.get("document_type"),
                     "status": "PASS",
                 },
                 indent=2,
