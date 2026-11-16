@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from app.extraction.invoice import extract_invoice, extract_invoice_document
 from app.agents.invoice_resolver import apply_proposal, resolve_invoice
+from app.classification.rules import classify_document
 from app.pdftext.poppler import parse_bbox_layout
 from app.ocr.rapidocr_adapter import RapidOCREngine
 from app.tables.region import detect_table_region, translate_ocr_blocks
@@ -67,6 +68,18 @@ class InvoiceDocumentExtractRequest(BaseModel):
     mapping_config: dict[str, Any] | None = None
 
 
+class ClassificationPageInput(BaseModel):
+    page: int = Field(ge=1)
+    ocr_blocks: list[OCRBlockInput] = Field(default_factory=list)
+
+
+class ClassificationRequest(BaseModel):
+    document_id: str
+    pages: list[ClassificationPageInput]
+    document_type_hint: str | None = None
+    hint_source: str | None = None
+
+
 @lru_cache(maxsize=1)
 def ocr_engine() -> RapidOCREngine:
     return RapidOCREngine()
@@ -91,8 +104,27 @@ def ready() -> dict:
         "checks": {
             "rapidocr": rapidocr_available,
             "rapid_table": rapidtable_available,
+            "classification_rules": True,
         },
     }
+
+
+@app.post("/v1/classify")
+def run_classification(request: ClassificationRequest) -> dict[str, Any]:
+    if not request.pages:
+        raise HTTPException(status_code=400, detail="pages must not be empty")
+    return classify_document(
+        document_id=request.document_id,
+        pages=[
+            {
+                "page": page.page,
+                "ocr_blocks": [block.model_dump() for block in page.ocr_blocks],
+            }
+            for page in request.pages
+        ],
+        document_type_hint=request.document_type_hint,
+        hint_source=request.hint_source,
+    )
 
 
 @app.post("/v1/ocr")
