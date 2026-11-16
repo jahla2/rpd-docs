@@ -154,6 +154,21 @@ func ApplyOperations(value string, operations []Transform) (*string, bool) {
                 return nil, false
             }
             current = *normalized
+        case "split":
+            delimiter,ok:=operation.Config["delimiter"].(string)
+            if !ok || delimiter=="" { return nil,false }
+            index,ok:=splitIndex(operation.Config["index"])
+            if !ok { return nil,false }
+            parts:=strings.Split(current,delimiter)
+            if index<0 || index>=len(parts) { return nil,false }
+            current=parts[index]
+            trim:=true
+            if rawTrim,exists:=operation.Config["trim"]; exists {
+                parsed,ok:=rawTrim.(bool)
+                if !ok { return nil,false }
+                trim=parsed
+            }
+            if trim { current=strings.TrimSpace(current) }
         }
     }
 
@@ -202,4 +217,15 @@ func normalizePreviewDate(value string) *string {
         }
     }
     return nil
+}
+
+
+func splitIndex(raw any)(int,bool){
+    switch value:=raw.(type) {
+    case int:
+        if value>=0 && value<=31 { return value,true }
+    case float64:
+        if value>=0 && value<=31 && value==float64(int(value)) { return int(value),true }
+    }
+    return 0,false
 }
