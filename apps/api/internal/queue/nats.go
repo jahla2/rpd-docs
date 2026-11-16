@@ -89,6 +89,15 @@ func (p *Publisher) PublishReconciliation(msg ReconciliationJobMessage) error {
     return err
 }
 
+func (p *Publisher) PublishRaw(subject string,payload []byte,dedupeKey string) error {
+    if dedupeKey=="" {
+        _,err:=p.js.Publish(subject,payload)
+        return err
+    }
+    _,err:=p.js.Publish(subject,payload,nats.MsgId(dedupeKey))
+    return err
+}
+
 func (p *Publisher) PublishJSON(subject string,msg any) error {
     payload,err:=json.Marshal(msg)
     if err!=nil { return err }
