@@ -809,6 +809,15 @@ func (w *Worker) persistClassification(ctx context.Context,job JobMessage,result
     return err
 }
 
+func supportsFinancialExtraction(documentType string) bool {
+    switch strings.TrimSpace(strings.ToLower(documentType)) {
+    case "invoice","supplier_statement","bank_statement":
+        return true
+    default:
+        return false
+    }
+}
+
 func (w *Worker) finalizeUnsupportedDocument(
     ctx context.Context,
     job JobMessage,
@@ -912,8 +921,14 @@ func (w *Worker) persistCanonicalRecords(
     canonicalBody []byte,
     validationResult validation.Result,
 ) error {
+    var generic CanonicalGenericDocument
+    if err:=json.Unmarshal(canonicalBody,&generic); err!=nil { return err }
+
     var invoice CanonicalInvoiceDocument
-    if err:=json.Unmarshal(canonicalBody,&invoice); err!=nil { return err }
+    genericShape:=len(generic.Fields)>0 || len(generic.Tables)>0
+    if !genericShape {
+        if err:=json.Unmarshal(canonicalBody,&invoice); err!=nil { return err }
+    }
 
     tx,err:=w.DB.Begin(ctx)
     if err!=nil { return err }
@@ -938,21 +953,34 @@ func (w *Worker) persistCanonicalRecords(
         return err
     }
 
-    fields:=[]struct{
+    type persistedField struct {
         Name string
         Type string
         Value *CanonicalField
-    }{
-        {"supplier_name","string",invoice.SupplierName},
-        {"supplier_code","identifier",invoice.SupplierCode},
-        {"invoice_number","identifier",invoice.InvoiceNumber},
-        {"invoice_date","date",invoice.InvoiceDate},
-        {"due_date","date",invoice.DueDate},
-        {"po_number","identifier",invoice.PONumber},
-        {"currency","currency",invoice.Currency},
-        {"subtotal","decimal",invoice.Subtotal},
-        {"tax","decimal",invoice.Tax},
-        {"grand_total","decimal",invoice.GrandTotal},
+    }
+    fields:=make([]persistedField,0)
+
+    if genericShape {
+        for name,value:=range generic.Fields {
+            dataType:="string"
+            if value!=nil && strings.TrimSpace(value.DataType)!="" {
+                dataType=strings.TrimSpace(value.DataType)
+            }
+            fields=append(fields,persistedField{Name:name,Type:dataType,Value:value})
+        }
+    } else {
+        fields=[]persistedField{
+            {"supplier_name","string",invoice.SupplierName},
+            {"supplier_code","identifier",invoice.SupplierCode},
+            {"invoice_number","identifier",invoice.InvoiceNumber},
+            {"invoice_date","date",invoice.InvoiceDate},
+            {"due_date","date",invoice.DueDate},
+            {"po_number","identifier",invoice.PONumber},
+            {"currency","currency",invoice.Currency},
+            {"subtotal","decimal",invoice.Subtotal},
+            {"tax","decimal",invoice.Tax},
+            {"grand_total","decimal",invoice.GrandTotal},
+        }
     }
 
     for _,entry:=range fields {
@@ -966,8 +994,14 @@ func (w *Worker) persistCanonicalRecords(
         var page any
         if entry.Value.Evidence.Page>0 { page=entry.Value.Evidence.Page }
 
+        bboxJSON:=""
+        if len(entry.Value.Evidence.BBox)>0 {
+            encoded,_:=json.Marshal(entry.Value.Evidence.BBox)
+            bboxJSON=string(encoded)
+        }
         evidenceJSON,_:=json.Marshal(map[string]any{
             "block_ids":entry.Value.Evidence.BlockIDs,
+            "bbox":entry.Value.Evidence.BBox,
             "method":sourceMethod,
         })
 
@@ -975,22 +1009,43 @@ func (w *Worker) persistCanonicalRecords(
           INSERT INTO extracted_fields
             (tenant_id,document_version_id,field_name,raw_value,normalized_value,data_type,
              confidence,page_number,bbox_json,evidence_json,source_method,requires_review)
-          VALUES ($1,$2,$3,NULLIF($4,''),$5,$6,$7,$8,NULL,$9::jsonb,$10,$11)
+          VALUES ($1,$2,$3,NULLIF($4,''),$5,$6,$7,$8,NULLIF($9,'')::jsonb,$10::jsonb,$11,$12)
         `,job.TenantID,versionID,entry.Name,entry.Value.Raw,entry.Value.Value,entry.Type,
-          confidence,page,string(evidenceJSON),sourceMethod,requiresReview); err!=nil {
+          confidence,page,bboxJSON,string(evidenceJSON),sourceMethod,requiresReview); err!=nil {
             return err
         }
     }
 
-    for index,item:=range invoice.LineItems {
-        encoded,marshalErr:=json.Marshal(item)
-        if marshalErr!=nil { return marshalErr }
-        if _,err=tx.Exec(ctx,`
-          INSERT INTO document_line_items
-            (tenant_id,document_version_id,row_number,data_json,requires_review)
-          VALUES ($1,$2,$3,$4::jsonb,false)
-        `,job.TenantID,versionID,index+1,string(encoded)); err!=nil {
-            return err
+    rowNumber:=0
+    if genericShape {
+        for tableName,rows:=range generic.Tables {
+            for _,row:=range rows {
+                rowNumber++
+                item:=make(map[string]any,len(row)+1)
+                item["_table"]=tableName
+                for key,value:=range row { item[key]=value }
+                encoded,marshalErr:=json.Marshal(item)
+                if marshalErr!=nil { return marshalErr }
+                if _,err=tx.Exec(ctx,`
+                  INSERT INTO document_line_items
+                    (tenant_id,document_version_id,row_number,data_json,requires_review)
+                  VALUES ($1,$2,$3,$4::jsonb,false)
+                `,job.TenantID,versionID,rowNumber,string(encoded)); err!=nil {
+                    return err
+                }
+            }
+        }
+    } else {
+        for index,item:=range invoice.LineItems {
+            encoded,marshalErr:=json.Marshal(item)
+            if marshalErr!=nil { return marshalErr }
+            if _,err=tx.Exec(ctx,`
+              INSERT INTO document_line_items
+                (tenant_id,document_version_id,row_number,data_json,requires_review)
+              VALUES ($1,$2,$3,$4::jsonb,false)
+            `,job.TenantID,versionID,index+1,string(encoded)); err!=nil {
+                return err
+            }
         }
     }
 
