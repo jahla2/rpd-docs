@@ -72,6 +72,39 @@ make logs
 make down
 ```
 
+## Local document classification
+
+The hot path is a cascade:
+
+```text
+explicit type
+→ deterministic rules
+→ ModernBERT ONNX only when rules are uncertain
+→ unknown/review when confidence is still insufficient
+```
+
+Rules are enabled by default and require no additional model download. To install the optional local ModernBERT INT8 fallback:
+
+```bash
+make model-modernbert
+```
+
+Then enable it:
+
+```bash
+DOCUMENT_CLASSIFIER_BACKEND=modernbert docker compose up -d --build
+```
+
+The model is kept outside Git and mounted read-only at `/models`. AI readiness fails if `modernbert` is explicitly enabled but the model cannot be loaded. Classification is capped at three seconds by the Go orchestrator; a timeout becomes `unknown` and routes to review instead of blocking the pipeline.
+
+Benchmark the local classifier after installing the model:
+
+```bash
+python benchmarks/classification_latency.py --backend modernbert --provider cpu
+```
+
+The default ModernBERT adapter uses the INT8 ONNX graph with a 256-token cap to prioritize latency. Common high-confidence invoices and purchase orders remain on the deterministic path and never invoke the model.
+
 ## Run tests
 
 Component tests:
