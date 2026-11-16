@@ -878,6 +878,28 @@ func (w *Worker) setStatus(ctx context.Context,job JobMessage,status string,comp
     return w.emitEvent(ctx,job,"status.changed",status,progress,nil,nil,nil)
 }
 
+func (w *Worker) MarkRetrying(ctx context.Context,job JobMessage,cause error) error {
+    message:=""
+    if cause!=nil { message=cause.Error() }
+    if _,err:=w.DB.Exec(ctx,`
+      UPDATE processing_jobs
+      SET status='RETRYING',failed_at=NULL,completed_at=NULL
+      WHERE id=$1 AND tenant_id=$2
+    `,job.JobID,job.TenantID); err!=nil {
+        return err
+    }
+    if _,err:=w.DB.Exec(ctx,`
+      UPDATE documents
+      SET status='RETRYING',updated_at=now()
+      WHERE id=$1 AND tenant_id=$2
+    `,job.DocumentID,job.TenantID); err!=nil {
+        return err
+    }
+    return w.emitEvent(ctx,job,"document.retrying","RETRYING",0,nil,nil,map[string]any{
+        "error":message,
+    })
+}
+
 func (w *Worker) fail(ctx context.Context,job JobMessage,cause error) error {
     _=w.failStep(ctx,job,cause)
     _,_=w.DB.Exec(ctx,`
