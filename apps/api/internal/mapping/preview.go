@@ -47,7 +47,17 @@ func PreviewTemplate(config TemplateConfig, headers []string, samples map[string
                     suggestion.Target = rule.Target
                     suggestion.Confidence = 1.0
                     suggestion.Method = "template_alias_exact"
-                    matchedRules[ruleIndex] = headerIndex
+                    if existingHeaderIndex, exists := matchedRules[ruleIndex]; exists {
+                        preview.ValidationErrors = append(
+                            preview.ValidationErrors,
+                            fmt.Sprintf(
+                                "target %q matches multiple source columns: %q and %q",
+                                rule.Target, headers[existingHeaderIndex], header,
+                            ),
+                        )
+                    } else {
+                        matchedRules[ruleIndex] = headerIndex
+                    }
                     matched = true
                     break
                 }
@@ -89,6 +99,7 @@ func PreviewTemplate(config TemplateConfig, headers []string, samples map[string
             if values := samples[header]; rowIndex < len(values) {
                 value = values[rowIndex]
             }
+            value = strings.TrimSpace(value)
             transformed, excluded := ApplyOperations(value, rule.Operations)
             if excluded || transformed == nil {
                 continue
