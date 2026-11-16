@@ -140,18 +140,23 @@ def _inline_candidate(
     aliases: list[str],
     data_type: str,
 ) -> dict[str, Any] | None:
-    for alias in aliases:
-        escaped = re.escape(alias).replace(r"\ ", r"\s+")
-        pattern = re.compile(rf"(?:^|\b){escaped}\s*[:#-]?\s*(.+)$", re.IGNORECASE)
-        for block in blocks:
-            text = str(block.get("text", "")).strip()
-            match = pattern.search(text)
-            if not match:
-                continue
-            raw_value = match.group(1).strip()
-            value = _normalize_value(raw_value, data_type)
-            if value:
-                return _field(value, text, block, data_type, "schema_alias")
+    # Prefer explicit label/value separators before relaxed matching. This
+    # prevents headings such as "BANK STATEMENT" from being interpreted as
+    # the value of the short alias "bank" when "Bank: Metro Bank" exists.
+    for require_separator in (True, False):
+        for alias in aliases:
+            escaped = re.escape(alias).replace(r"\ ", r"\s+")
+            separator = r"\s*[:#-]\s*" if require_separator else r"\s+"
+            pattern = re.compile(rf"(?:^|\b){escaped}{separator}(.+)$", re.IGNORECASE)
+            for block in blocks:
+                text = str(block.get("text", "")).strip()
+                match = pattern.search(text)
+                if not match:
+                    continue
+                raw_value = match.group(1).strip()
+                value = _normalize_value(raw_value, data_type)
+                if value:
+                    return _field(value, text, block, data_type, "schema_alias")
     return None
 
 
