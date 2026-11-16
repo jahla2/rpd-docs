@@ -30,8 +30,8 @@ services:
       - -ec
       - |
         for migration in /migrations/*.sql; do
-          echo "Applying $migration"
-          psql -h postgres -U rpd -d rpd -v ON_ERROR_STOP=1 -f "$migration"
+          echo "Applying $$migration"
+          psql -h postgres -U rpd -d rpd -v ON_ERROR_STOP=1 -f "$$migration"
         done
     restart: "no"
 
