@@ -14,6 +14,7 @@ import (
     "strings"
     "time"
 
+    "github.com/jackc/pgx/v5"
     "github.com/jackc/pgx/v5/pgxpool"
     "github.com/jahla2/rpd-docs/apps/orchestrator/internal/objectstore"
     "github.com/jahla2/rpd-docs/apps/orchestrator/internal/validation"
@@ -112,7 +113,14 @@ func (w *Worker) HandlePreprocess(ctx context.Context, job JobMessage) error {
         return fmt.Errorf("invalid job contract")
     }
 
-    if err:=w.setStatus(ctx,job,"PREPROCESSING",false,5); err!=nil { return err }
+    completed,err:=w.beginStep(ctx,job)
+    if err!=nil { return err }
+    if completed {
+        w.Logger.Info("job_step_already_completed","job_id",job.JobID,"run_id",job.RunID,"step",job.Step)
+        return nil
+    }
+
+    if err:=w.setStatus(ctx,job,"PREPROCESSING",false,5); err!=nil { return w.fail(ctx,job,err) }
 
     preprocessDir:=filepath.Join(w.StorageRoot,"tenants",job.TenantID,"processing",job.DocumentID,job.RunID,"preprocess")
     if err:=os.MkdirAll(preprocessDir,0o750); err!=nil {
@@ -387,11 +395,129 @@ func (w *Worker) HandlePreprocess(ctx context.Context, job JobMessage) error {
         "requires_review":requiresReview,
     })
 
+    if err:=w.completeStep(ctx,job); err!=nil { return err }
+
     w.Logger.Info("document_pipeline_completed",
         "tenant_id",job.TenantID,"document_id",job.DocumentID,"job_id",job.JobID,
         "document_version_id",versionID,"version_number",versionNumber,
         "page_count",native.PageCount,"status",finalStatus,"canonical_artifact",canonicalPath)
     return nil
+}
+
+func (w *Worker) beginStep(ctx context.Context,job JobMessage)(bool,error){
+    step:=strings.TrimSpace(job.Step)
+    if step=="" { step="PREPROCESS" }
+    key:=job.JobID+":"+step
+
+    tx,err:=w.DB.Begin(ctx)
+    if err!=nil { return false,err }
+    defer tx.Rollback(ctx)
+
+    var status string
+    var attempt int
+    err=tx.QueryRow(ctx,`
+      SELECT status,attempt_count
+      FROM job_steps
+      WHERE tenant_id=$1 AND job_id=$2 AND step_name=$3
+      FOR UPDATE
+    `,job.TenantID,job.JobID,step).Scan(&status,&attempt)
+
+    if err==pgx.ErrNoRows {
+        attempt=1
+        if _,err=tx.Exec(ctx,`
+          INSERT INTO job_steps
+            (tenant_id,job_id,run_id,step_name,status,attempt_count,started_at,idempotency_key,updated_at)
+          VALUES ($1,$2,$3,$4,'RUNNING',1,now(),$5,now())
+        `,job.TenantID,job.JobID,job.RunID,step,key); err!=nil {
+            return false,err
+        }
+    } else if err!=nil {
+        return false,err
+    } else if status=="COMPLETED" {
+        if err=tx.Commit(ctx); err!=nil { return false,err }
+        return true,nil
+    } else {
+        attempt++
+        if _,err=tx.Exec(ctx,`
+          UPDATE job_steps
+          SET run_id=$1,status='RUNNING',attempt_count=$2,started_at=now(),
+              completed_at=NULL,last_error=NULL,idempotency_key=$3,updated_at=now()
+          WHERE tenant_id=$4 AND job_id=$5 AND step_name=$6
+        `,job.RunID,attempt,key,job.TenantID,job.JobID,step); err!=nil {
+            return false,err
+        }
+    }
+
+    if _,err=tx.Exec(ctx,`
+      INSERT INTO job_attempts
+        (tenant_id,job_id,run_id,step_name,attempt_number,status,started_at)
+      VALUES ($1,$2,$3,$4,$5,'RUNNING',now())
+      ON CONFLICT (job_id,step_name,attempt_number) DO NOTHING
+    `,job.TenantID,job.JobID,job.RunID,step,attempt); err!=nil {
+        return false,err
+    }
+
+    if err=tx.Commit(ctx); err!=nil { return false,err }
+    return false,nil
+}
+
+func (w *Worker) completeStep(ctx context.Context,job JobMessage) error {
+    step:=strings.TrimSpace(job.Step)
+    if step=="" { step="PREPROCESS" }
+
+    tx,err:=w.DB.Begin(ctx)
+    if err!=nil { return err }
+    defer tx.Rollback(ctx)
+
+    if _,err=tx.Exec(ctx,`
+      UPDATE job_steps
+      SET status='COMPLETED',completed_at=now(),last_error=NULL,updated_at=now()
+      WHERE tenant_id=$1 AND job_id=$2 AND step_name=$3
+    `,job.TenantID,job.JobID,step); err!=nil {
+        return err
+    }
+    if _,err=tx.Exec(ctx,`
+      UPDATE job_attempts
+      SET status='COMPLETED',completed_at=now(),last_error=NULL
+      WHERE tenant_id=$1 AND job_id=$2 AND step_name=$3
+        AND attempt_number=(
+          SELECT MAX(attempt_number) FROM job_attempts
+          WHERE tenant_id=$1 AND job_id=$2 AND step_name=$3
+        )
+    `,job.TenantID,job.JobID,step); err!=nil {
+        return err
+    }
+    return tx.Commit(ctx)
+}
+
+func (w *Worker) failStep(ctx context.Context,job JobMessage,cause error) error {
+    step:=strings.TrimSpace(job.Step)
+    if step=="" { step="PREPROCESS" }
+    message:=cause.Error()
+
+    tx,err:=w.DB.Begin(ctx)
+    if err!=nil { return err }
+    defer tx.Rollback(ctx)
+
+    if _,err=tx.Exec(ctx,`
+      UPDATE job_steps
+      SET status='FAILED',completed_at=now(),last_error=$1,updated_at=now()
+      WHERE tenant_id=$2 AND job_id=$3 AND step_name=$4
+    `,message,job.TenantID,job.JobID,step); err!=nil {
+        return err
+    }
+    if _,err=tx.Exec(ctx,`
+      UPDATE job_attempts
+      SET status='FAILED',completed_at=now(),last_error=$1
+      WHERE tenant_id=$2 AND job_id=$3 AND step_name=$4
+        AND attempt_number=(
+          SELECT MAX(attempt_number) FROM job_attempts
+          WHERE tenant_id=$2 AND job_id=$3 AND step_name=$4
+        )
+    `,message,job.TenantID,job.JobID,step); err!=nil {
+        return err
+    }
+    return tx.Commit(ctx)
 }
 
 func pageProgress(base,span,index,total int) int {
@@ -440,21 +566,34 @@ func (w *Worker) createDocumentVersion(ctx context.Context,job JobMessage,docume
         mappingTemplateVersion=value
     }
 
-    err:=w.DB.QueryRow(ctx,`
+    tx,err:=w.DB.Begin(ctx)
+    if err!=nil { return "",0,err }
+    defer tx.Rollback(ctx)
+
+    if _,err=tx.Exec(ctx,`SELECT pg_advisory_xact_lock(hashtext($1))`,job.DocumentID); err!=nil {
+        return "",0,err
+    }
+
+    err=tx.QueryRow(ctx,`
       INSERT INTO document_versions
-        (tenant_id,document_id,version_number,pipeline_version,mapping_template_id,mapping_template_version)
-      SELECT $1,$2,COALESCE(MAX(version_number),0)+1,'mvp-0.4',$3,$4
+        (tenant_id,document_id,version_number,pipeline_version,mapping_template_id,mapping_template_version,source_run_id)
+      SELECT $1,$2,COALESCE(MAX(version_number),0)+1,'mvp-0.5',$3,$4,$5
       FROM document_versions
       WHERE tenant_id=$1 AND document_id=$2
+      ON CONFLICT (document_id,source_run_id) WHERE source_run_id IS NOT NULL
+      DO UPDATE SET pipeline_version=EXCLUDED.pipeline_version
       RETURNING id::text,version_number
-    `,job.TenantID,job.DocumentID,mappingTemplateID,mappingTemplateVersion).Scan(&id,&version)
+    `,job.TenantID,job.DocumentID,mappingTemplateID,mappingTemplateVersion,job.RunID).Scan(&id,&version)
     if err!=nil { return "",0,err }
 
-    _,err=w.DB.Exec(ctx,`
+    if _,err=tx.Exec(ctx,`
       UPDATE documents SET document_type=$1,updated_at=now()
       WHERE id=$2 AND tenant_id=$3
-    `,documentType,job.DocumentID,job.TenantID)
-    return id,version,err
+    `,documentType,job.DocumentID,job.TenantID); err!=nil {
+        return "",0,err
+    }
+    if err=tx.Commit(ctx); err!=nil { return "",0,err }
+    return id,version,nil
 }
 
 func (w *Worker) setStatus(ctx context.Context,job JobMessage,status string,completed bool,progress int) error {
@@ -483,6 +622,7 @@ func (w *Worker) setStatus(ctx context.Context,job JobMessage,status string,comp
 }
 
 func (w *Worker) fail(ctx context.Context,job JobMessage,cause error) error {
+    _=w.failStep(ctx,job,cause)
     _,_=w.DB.Exec(ctx,`
       UPDATE processing_jobs SET status='FAILED',failed_at=now()
       WHERE id=$1 AND tenant_id=$2
@@ -568,7 +708,12 @@ func (w *Worker) createDocumentReviewTask(ctx context.Context,job JobMessage,ver
     _,err:=w.DB.Exec(ctx,`
       INSERT INTO review_tasks
         (tenant_id,document_id,task_type,status,priority,reason)
-      VALUES ($1,$2,'DOCUMENT_VALIDATION','OPEN',50,$3)
+      SELECT $1,$2,'DOCUMENT_VALIDATION','OPEN',50,$3
+      WHERE NOT EXISTS (
+        SELECT 1 FROM review_tasks
+        WHERE tenant_id=$1 AND document_id=$2
+          AND task_type='DOCUMENT_VALIDATION' AND status='OPEN'
+      )
     `,job.TenantID,job.DocumentID,reason)
     return err
 }
@@ -586,7 +731,11 @@ func (w *Worker) addArtifact(ctx context.Context,job JobMessage,kind,path string
     _,err=w.DB.Exec(ctx,`
       INSERT INTO artifacts
         (tenant_id,document_id,run_id,artifact_type,storage_uri,content_type,size_bytes)
-      VALUES ($1,$2,$3,$4,$5,$6,$7)
+      SELECT $1,$2,$3,$4,$5,$6,$7
+      WHERE NOT EXISTS (
+        SELECT 1 FROM artifacts
+        WHERE tenant_id=$1 AND run_id=$3 AND artifact_type=$4 AND storage_uri=$5
+      )
     `,job.TenantID,job.DocumentID,job.RunID,kind,storageURI,contentType,info.Size())
     return err
 }
@@ -604,7 +753,12 @@ func (w *Worker) addVersionArtifact(ctx context.Context,job JobMessage,versionID
     _,err=w.DB.Exec(ctx,`
       INSERT INTO artifacts
         (tenant_id,document_id,document_version_id,run_id,artifact_type,storage_uri,content_type,size_bytes)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+      SELECT $1,$2,$3,$4,$5,$6,$7,$8
+      WHERE NOT EXISTS (
+        SELECT 1 FROM artifacts
+        WHERE tenant_id=$1 AND document_version_id=$3 AND run_id=$4
+          AND artifact_type=$5 AND storage_uri=$6
+      )
     `,job.TenantID,job.DocumentID,versionID,job.RunID,kind,storageURI,contentType,info.Size())
     return err
 }
