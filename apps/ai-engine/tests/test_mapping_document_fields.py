@@ -33,3 +33,35 @@ def test_custom_document_field_aliases():
     assert result["currency"]["value"] == "PHP"
     assert result["grand_total"]["value"] == "1500.25"
     assert result["requires_review"] is False
+
+
+
+def test_split_operation_applies_to_document_field_alias():
+    config = {
+        "columns": [
+            {
+                "source_aliases": ["Document Ref"],
+                "target": "invoice_number",
+                "type": "identifier",
+                "operations": [
+                    {
+                        "operation": "split",
+                        "config": {"delimiter": "-", "index": 1, "trim": True},
+                    }
+                ],
+            }
+        ]
+    }
+    blocks = [
+        {"block_id": "b1", "text": "ABC Trading", "bbox": box(), "confidence": 1.0},
+        {"block_id": "b2", "text": "Document Ref: INV- 001 ", "bbox": box(), "confidence": 1.0},
+        {"block_id": "b3", "text": "Invoice Date: 2026-11-16", "bbox": box(), "confidence": 1.0},
+        {"block_id": "b4", "text": "Currency: PHP", "bbox": box(), "confidence": 1.0},
+        {"block_id": "b5", "text": "Grand Total: 100.00", "bbox": box(), "confidence": 1.0},
+    ]
+    result = extract_invoice_document(
+        "doc-split",
+        [{"page": 1, "ocr_blocks": blocks, "table_html": None}],
+        config,
+    )
+    assert result["invoice_number"]["value"] == "001"
