@@ -71,7 +71,7 @@ func requiredPermission(method,path string) string {
     if strings.HasPrefix(path,"/api/v1/exports") { return "reconciliation:read" }
     if strings.HasPrefix(path,"/api/v1/artifacts") { return "document:read" }
     if strings.HasPrefix(path,"/api/v1/output-profiles") { return permissionByMethod(method,"config:read","config:write") }
-    if strings.HasPrefix(path,"/api/v1/document-types") || strings.HasPrefix(path,"/api/v1/datasets") || strings.HasPrefix(path,"/api/v1/mapping-templates") || strings.HasPrefix(path,"/api/v1/suppliers") {
+    if strings.HasPrefix(path,"/api/v1/document-types") || strings.HasPrefix(path,"/api/v1/field-definitions") || strings.HasPrefix(path,"/api/v1/datasets") || strings.HasPrefix(path,"/api/v1/mapping-templates") || strings.HasPrefix(path,"/api/v1/suppliers") {
         return permissionByMethod(method,"config:read","config:write")
     }
     if strings.HasPrefix(path,"/api/v1/documents") || strings.HasPrefix(path,"/api/v1/jobs") {
