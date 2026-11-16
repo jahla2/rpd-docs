@@ -36,6 +36,10 @@ type MappingPreviewRequest struct {
     Samples map[string][]string `json:"samples,omitempty"`
 }
 
+type ReprocessRequest struct {
+    MappingTemplateID string `json:"mapping_template_id,omitempty"`
+}
+
 func New(st *store.Store, fs *storage.Manager, q *queue.Publisher, defaultTenantID,apiKeyPepper string, logger *slog.Logger) http.Handler {
     s := &Server{
         store:st,storage:fs,queue:q,defaultTenantID:defaultTenantID,logger:logger,
@@ -48,6 +52,7 @@ func New(st *store.Store, fs *storage.Manager, q *queue.Publisher, defaultTenant
     mux.HandleFunc("GET /api/v1/documents/{id}", s.getDocument)
     mux.HandleFunc("GET /api/v1/documents/{id}/result", s.getDocumentResult)
     mux.HandleFunc("GET /api/v1/documents/{id}/artifacts", s.getDocumentArtifacts)
+    mux.HandleFunc("POST /api/v1/documents/{id}/reprocess", s.reprocessDocument)
     mux.HandleFunc("GET /api/v1/jobs/{id}", s.getJob)
     mux.HandleFunc("GET /api/v1/jobs/{id}/steps", s.getJobSteps)
     mux.HandleFunc("GET /api/v1/jobs/{id}/pages", s.listJobPages)
@@ -149,6 +154,12 @@ func (s *Server) upload(w http.ResponseWriter,r *http.Request) {
         writeError(w,http.StatusInternalServerError,"STORAGE_FAILED","failed to store original"); return
     }
 
+    duplicateIDs,duplicateErr:=s.store.FindDuplicateDocuments(r.Context(),tenantID,saved.SHA256,20)
+    if duplicateErr!=nil {
+        s.logger.Warn("duplicate lookup failed","error",duplicateErr,"document_id",documentID)
+        duplicateIDs=[]string{}
+    }
+
     if saved.StorageURI!=saved.Path { options["source_uri"]=saved.StorageURI }
     msg := queue.JobMessage{
         SchemaVersion:"1.0",JobID:jobID,TenantID:tenantID,DocumentID:documentID,
@@ -179,6 +190,7 @@ func (s *Server) upload(w http.ResponseWriter,r *http.Request) {
 
     writeJSON(w,http.StatusAccepted,map[string]any{
         "document_id":documentID,"job_id":jobID,"run_id":runID,"status":"QUEUED","sha256":saved.SHA256,
+        "possible_duplicate":len(duplicateIDs)>0,"duplicate_document_ids":duplicateIDs,
     })
 }
 
@@ -216,6 +228,83 @@ func (s *Server) getDocumentArtifacts(w http.ResponseWriter,r *http.Request) {
         writeError(w,http.StatusInternalServerError,"DATABASE_FAILED","failed to list artifacts"); return
     }
     writeJSON(w,http.StatusOK,map[string]any{"items":artifacts})
+}
+
+func (s *Server) reprocessDocument(w http.ResponseWriter,r *http.Request) {
+    tenantID:=tenantFrom(r,s.defaultTenantID)
+    documentID:=r.PathValue("id")
+    document,err:=s.store.GetDocument(r.Context(),tenantID,documentID)
+    if store.IsNotFound(err) {
+        writeError(w,http.StatusNotFound,"NOT_FOUND","document not found"); return
+    }
+    if err!=nil {
+        writeError(w,http.StatusInternalServerError,"DATABASE_FAILED","failed to read document"); return
+    }
+
+    var request ReprocessRequest
+    if r.ContentLength!=0 {
+        decoder:=json.NewDecoder(http.MaxBytesReader(w,r.Body,1<<20))
+        decoder.DisallowUnknownFields()
+        if err:=decoder.Decode(&request); err!=nil {
+            writeError(w,http.StatusBadRequest,"INVALID_REPROCESS_REQUEST","invalid JSON body"); return
+        }
+    }
+
+    options:=map[string]any{}
+    if templateID:=strings.TrimSpace(request.MappingTemplateID); templateID!="" {
+        template,templateErr:=s.store.GetMappingTemplate(r.Context(),tenantID,templateID)
+        if store.IsNotFound(templateErr) {
+            writeError(w,http.StatusBadRequest,"INVALID_MAPPING_TEMPLATE","mapping template not found"); return
+        }
+        if templateErr!=nil {
+            writeError(w,http.StatusInternalServerError,"DATABASE_FAILED","failed to read mapping template"); return
+        }
+        if template.Status!="ACTIVE" {
+            writeError(w,http.StatusConflict,"MAPPING_TEMPLATE_NOT_ACTIVE","selected mapping template must be ACTIVE"); return
+        }
+        var config any
+        if err:=json.Unmarshal(template.Config,&config); err!=nil {
+            writeError(w,http.StatusInternalServerError,"INVALID_MAPPING_TEMPLATE","stored mapping template is invalid"); return
+        }
+        options["mapping_template_id"]=template.ID
+        options["mapping_template_version"]=template.Version
+        options["mapping_config"]=config
+    }
+
+    if strings.HasPrefix(document.StorageURI,"s3://") {
+        options["source_uri"]=document.StorageURI
+    }
+
+    jobID,runID:=newUUID(),newUUID()
+    msg:=queue.JobMessage{
+        SchemaVersion:"1.0",JobID:jobID,TenantID:tenantID,DocumentID:documentID,
+        RunID:runID,Step:"PREPROCESS",InputArtifact:document.StorageURI,Options:options,
+    }
+    payload,err:=json.Marshal(msg)
+    if err!=nil {
+        writeError(w,http.StatusInternalServerError,"QUEUE_FAILED","failed to serialize processing job"); return
+    }
+    messageKey:=jobID+":"+runID+":PREPROCESS"
+
+    if err:=s.store.CreateReprocessJob(r.Context(),store.CreateReprocessJobParams{
+        TenantID:tenantID,DocumentID:documentID,JobID:jobID,RunID:runID,
+        OutboxSubject:"document.preprocess",OutboxMessageKey:messageKey,OutboxPayload:payload,
+    }); err!=nil {
+        if store.IsNotFound(err) {
+            writeError(w,http.StatusNotFound,"NOT_FOUND","document not found"); return
+        }
+        writeError(w,http.StatusInternalServerError,"DATABASE_FAILED","failed to queue reprocessing"); return
+    }
+
+    if err:=s.queue.PublishRaw("document.preprocess",payload,messageKey); err!=nil {
+        s.logger.Warn("reprocess publish deferred to outbox","error",err,"document_id",documentID,"job_id",jobID)
+    } else if err:=s.store.MarkOutboxPublishedByKey(r.Context(),messageKey); err!=nil {
+        s.logger.Warn("mark reprocess outbox published failed","error",err,"document_id",documentID,"job_id",jobID)
+    }
+
+    writeJSON(w,http.StatusAccepted,map[string]any{
+        "document_id":documentID,"job_id":jobID,"run_id":runID,"status":"QUEUED",
+    })
 }
 
 func (s *Server) getJob(w http.ResponseWriter,r *http.Request) {
