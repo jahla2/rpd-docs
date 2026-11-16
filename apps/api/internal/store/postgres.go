@@ -140,8 +140,18 @@ func (s *Store) ListJobSteps(ctx context.Context,tenantID,jobID string)([]JobSte
     rows,err:=s.pool.Query(ctx,`
       SELECT step_name,status,attempt_count,started_at,completed_at,last_error
       FROM job_steps
-      WHERE tenant_id=$1 AND job_id=$2
-      ORDER BY started_at NULLS LAST,step_name
+      WHERE tenant_id=$1 AND job_id=$2 AND step_name<>'PIPELINE'
+      ORDER BY
+        CASE step_name
+          WHEN 'PREPROCESS' THEN 10
+          WHEN 'OCR' THEN 20
+          WHEN 'TABLE' THEN 30
+          WHEN 'MAPPING' THEN 40
+          WHEN 'VALIDATION' THEN 50
+          WHEN 'FINALIZE' THEN 60
+          ELSE 100
+        END,
+        started_at NULLS LAST,step_name
     `,tenantID,jobID)
     if err!=nil { return nil,err }
     defer rows.Close()
