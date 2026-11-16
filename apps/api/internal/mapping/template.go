@@ -62,6 +62,7 @@ var allowedOperations=map[string]bool{
     "decimal":true,
     "default":true,
     "exclude":true,
+    "split":true,
 }
 
 func ValidateTemplateConfig(raw json.RawMessage)(TemplateConfig,error){
@@ -111,6 +112,15 @@ func ValidateTemplateConfig(raw json.RawMessage)(TemplateConfig,error){
                     index,operationIndex,operation.Operation)
             }
             config.Columns[index].Operations[operationIndex].Operation=op
+            if op=="split" {
+                normalizedConfig,err:=validateSplitConfig(operation.Config)
+                if err!=nil {
+                    return TemplateConfig{},fmt.Errorf(
+                        "column %d operation %d split config: %w",
+                        index,operationIndex,err)
+                }
+                config.Columns[index].Operations[operationIndex].Config=normalizedConfig
+            }
         }
     }
 
@@ -129,4 +139,52 @@ func ValidateTemplateConfig(raw json.RawMessage)(TemplateConfig,error){
         }
     }
     return config,nil
+}
+
+
+func validateSplitConfig(config map[string]any)(map[string]any,error){
+    if config==nil { return nil,fmt.Errorf("config is required") }
+
+    for key:=range config {
+        switch key {
+        case "delimiter","index","trim":
+        default:
+            return nil,fmt.Errorf("unsupported key %q",key)
+        }
+    }
+
+    delimiter,ok:=config["delimiter"].(string)
+    if !ok || delimiter=="" {
+        return nil,fmt.Errorf("delimiter must be a non-empty string")
+    }
+    if len(delimiter)>16 {
+        return nil,fmt.Errorf("delimiter must be at most 16 bytes")
+    }
+
+    rawIndex,ok:=config["index"]
+    if !ok { return nil,fmt.Errorf("index is required") }
+
+    index:=-1
+    switch value:=rawIndex.(type) {
+    case float64:
+        if value>=0 && value<=31 && value==float64(int(value)) { index=int(value) }
+    case int:
+        if value>=0 && value<=31 { index=value }
+    }
+    if index<0 {
+        return nil,fmt.Errorf("index must be an integer between 0 and 31")
+    }
+
+    trim:=true
+    if rawTrim,exists:=config["trim"]; exists {
+        parsed,ok:=rawTrim.(bool)
+        if !ok { return nil,fmt.Errorf("trim must be boolean") }
+        trim=parsed
+    }
+
+    return map[string]any{
+        "delimiter":delimiter,
+        "index":index,
+        "trim":trim,
+    },nil
 }
