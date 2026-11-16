@@ -150,6 +150,13 @@ func (s *Store) SaveMatch(ctx context.Context,tenantID,runID string,result recon
         (tenant_id,reconciliation_run_id,source_record_id,target_record_id,status,score,
          matching_rule,difference_amount,evidence_json)
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8::numeric,$9)
+      ON CONFLICT (tenant_id,reconciliation_run_id,source_record_id,target_record_id)
+      DO UPDATE SET
+        status=EXCLUDED.status,
+        score=EXCLUDED.score,
+        matching_rule=EXCLUDED.matching_rule,
+        difference_amount=EXCLUDED.difference_amount,
+        evidence_json=EXCLUDED.evidence_json
     `,tenantID,runID,result.SourceID,result.TargetID,result.Status,result.Score,
       result.MatchingRule,result.Difference,evidence)
     return err
@@ -171,6 +178,12 @@ func (s *Store) SaveException(
       INSERT INTO reconciliation_exceptions
         (tenant_id,reconciliation_run_id,source_record_id,exception_type,severity,message,evidence_json,status)
       VALUES ($1,$2,$3,$4,$5,$6,$7,'OPEN')
+      ON CONFLICT (tenant_id,reconciliation_run_id,source_record_id,exception_type)
+      DO UPDATE SET
+        severity=EXCLUDED.severity,
+        message=EXCLUDED.message,
+        evidence_json=EXCLUDED.evidence_json,
+        status='OPEN'
     `,tenantID,runID,sourceID,exceptionType,severity,message,evidenceJSON)
     if err!=nil { return err }
 
@@ -178,6 +191,7 @@ func (s *Store) SaveException(
       INSERT INTO review_tasks
         (tenant_id,reconciliation_run_id,source_record_id,task_type,status,priority,reason)
       VALUES ($1,$2,$3,'RECONCILIATION_EXCEPTION','OPEN',100,$4)
+      ON CONFLICT DO NOTHING
     `,tenantID,runID,sourceID,message)
     if err!=nil { return err }
 
