@@ -31,3 +31,27 @@ def test_translate_blocks_filters_and_rebases():
     assert len(translated) == 1
     assert translated[0]["bbox"][0] == 50.0
     assert translated[0]["bbox"][1] == 50.0
+
+
+def test_detect_statement_table_region_with_schema_headers():
+    blocks = [
+        {"block_id": "h1", "text": "Date", "bbox": box(80, 280, 160, 310), "confidence": 0.99},
+        {"block_id": "h2", "text": "Invoice No", "bbox": box(200, 280, 340, 310), "confidence": 0.99},
+        {"block_id": "h3", "text": "Debit", "bbox": box(500, 280, 590, 310), "confidence": 0.99},
+        {"block_id": "h4", "text": "Credit", "bbox": box(620, 280, 710, 310), "confidence": 0.99},
+        {"block_id": "h5", "text": "Balance", "bbox": box(760, 280, 900, 310), "confidence": 0.99},
+        {"block_id": "r1", "text": "2026-11-10", "bbox": box(80, 340, 180, 370), "confidence": 0.99},
+        {"block_id": "r2", "text": "INV-9", "bbox": box(200, 340, 340, 370), "confidence": 0.99},
+        {"block_id": "r3", "text": "6500.00", "bbox": box(760, 340, 900, 370), "confidence": 0.99},
+    ]
+    aliases = {
+        "date": ["date", "transaction date"],
+        "invoice_number": ["invoice no", "invoice number"],
+        "debit": ["debit"],
+        "credit": ["credit"],
+        "balance": ["balance"],
+    }
+    region = detect_table_region(blocks, 1000, 1400, header_aliases=aliases)
+    assert region is not None
+    assert region[1] < 280
+    assert region[2] >= 900
