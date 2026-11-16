@@ -296,14 +296,14 @@ Upload
 -> C++ preprocess
 -> embedded PDF text or RapidOCR
 -> CLASSIFY
--> invoice route or review route
--> RapidTable when required
--> extraction
--> mapping
+-> invoice / supplier_statement / bank_statement route
+-> RapidTable
+-> schema-driven extraction
 -> validation
 -> canonical data
--> reconciliation
--> review/export
+-> invoice: READY_FOR_RECONCILIATION
+-> statements: COMPLETED
+-> unsupported type: REVIEW_REQUIRED
 ```
 
 ## 12. Enable local ModernBERT classification
@@ -423,7 +423,7 @@ or:
 make e2e
 ```
 
-The smoke test exercises:
+The smoke test exercises both invoice and statement routing:
 
 ```text
 searchable invoice PDF
@@ -440,6 +440,13 @@ searchable invoice PDF
 -> match verification
 -> JSON export
 -> job-step verification
+
+supplier statement PDF
+-> upload without a document_type hint
+-> auto-classify as supplier_statement
+-> schema-driven statement extraction
+-> validate supplier/date/closing balance
+-> finish COMPLETED
 ```
 
 ## 16. ERP reconciliation API
