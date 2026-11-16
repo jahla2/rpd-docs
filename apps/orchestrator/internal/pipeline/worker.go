@@ -441,8 +441,7 @@ func (w *Worker) HandlePreprocess(ctx context.Context, job JobMessage) error {
 }
 
 func (w *Worker) beginStep(ctx context.Context,job JobMessage)(bool,error){
-    step:=strings.TrimSpace(job.Step)
-    if step=="" { step="PREPROCESS" }
+    step:="PIPELINE"
     key:=job.JobID+":"+step
 
     tx,err:=w.DB.Begin(ctx)
@@ -498,8 +497,7 @@ func (w *Worker) beginStep(ctx context.Context,job JobMessage)(bool,error){
 }
 
 func (w *Worker) completeStep(ctx context.Context,job JobMessage) error {
-    step:=strings.TrimSpace(job.Step)
-    if step=="" { step="PREPROCESS" }
+    step:="PIPELINE"
 
     tx,err:=w.DB.Begin(ctx)
     if err!=nil { return err }
@@ -527,8 +525,6 @@ func (w *Worker) completeStep(ctx context.Context,job JobMessage) error {
 }
 
 func (w *Worker) failStep(ctx context.Context,job JobMessage,cause error) error {
-    step:=strings.TrimSpace(job.Step)
-    if step=="" { step="PREPROCESS" }
     message:=cause.Error()
 
     tx,err:=w.DB.Begin(ctx)
@@ -538,22 +534,121 @@ func (w *Worker) failStep(ctx context.Context,job JobMessage,cause error) error 
     if _,err=tx.Exec(ctx,`
       UPDATE job_steps
       SET status='FAILED',completed_at=now(),last_error=$1,updated_at=now()
-      WHERE tenant_id=$2 AND job_id=$3 AND step_name=$4
-    `,message,job.TenantID,job.JobID,step); err!=nil {
+      WHERE tenant_id=$2 AND job_id=$3 AND status='RUNNING'
+    `,message,job.TenantID,job.JobID); err!=nil {
         return err
     }
     if _,err=tx.Exec(ctx,`
       UPDATE job_attempts
       SET status='FAILED',completed_at=now(),last_error=$1
-      WHERE tenant_id=$2 AND job_id=$3 AND step_name=$4
-        AND attempt_number=(
-          SELECT MAX(attempt_number) FROM job_attempts
-          WHERE tenant_id=$2 AND job_id=$3 AND step_name=$4
-        )
-    `,message,job.TenantID,job.JobID,step); err!=nil {
+      WHERE tenant_id=$2 AND job_id=$3 AND status='RUNNING'
+    `,message,job.TenantID,job.JobID); err!=nil {
         return err
     }
     return tx.Commit(ctx)
+}
+
+func (w *Worker) startStage(ctx context.Context,job JobMessage,step string) error {
+    step=strings.TrimSpace(step)
+    if step=="" { return nil }
+    key:=job.JobID+":stage:"+step
+
+    tx,err:=w.DB.Begin(ctx)
+    if err!=nil { return err }
+    defer tx.Rollback(ctx)
+
+    var attempt int
+    err=tx.QueryRow(ctx,`
+      SELECT attempt_count
+      FROM job_steps
+      WHERE tenant_id=$1 AND job_id=$2 AND step_name=$3
+      FOR UPDATE
+    `,job.TenantID,job.JobID,step).Scan(&attempt)
+    if err==pgx.ErrNoRows {
+        attempt=1
+        if _,err=tx.Exec(ctx,`
+          INSERT INTO job_steps
+            (tenant_id,job_id,run_id,step_name,status,attempt_count,started_at,idempotency_key,updated_at)
+          VALUES ($1,$2,$3,$4,'RUNNING',1,now(),$5,now())
+        `,job.TenantID,job.JobID,job.RunID,step,key); err!=nil {
+            return err
+        }
+    } else if err!=nil {
+        return err
+    } else {
+        attempt++
+        if _,err=tx.Exec(ctx,`
+          UPDATE job_steps
+          SET run_id=$1,status='RUNNING',attempt_count=$2,started_at=now(),
+              completed_at=NULL,last_error=NULL,idempotency_key=$3,updated_at=now()
+          WHERE tenant_id=$4 AND job_id=$5 AND step_name=$6
+        `,job.RunID,attempt,key,job.TenantID,job.JobID,step); err!=nil {
+            return err
+        }
+    }
+
+    if _,err=tx.Exec(ctx,`
+      INSERT INTO job_attempts
+        (tenant_id,job_id,run_id,step_name,attempt_number,status,started_at)
+      VALUES ($1,$2,$3,$4,$5,'RUNNING',now())
+      ON CONFLICT (job_id,step_name,attempt_number) DO NOTHING
+    `,job.TenantID,job.JobID,job.RunID,step,attempt); err!=nil {
+        return err
+    }
+    return tx.Commit(ctx)
+}
+
+func (w *Worker) completeStage(ctx context.Context,job JobMessage,step string) error {
+    step=strings.TrimSpace(step)
+    if step=="" { return nil }
+
+    tx,err:=w.DB.Begin(ctx)
+    if err!=nil { return err }
+    defer tx.Rollback(ctx)
+
+    if _,err=tx.Exec(ctx,`
+      UPDATE job_steps
+      SET status='COMPLETED',completed_at=now(),last_error=NULL,updated_at=now()
+      WHERE tenant_id=$1 AND job_id=$2 AND step_name=$3 AND status='RUNNING'
+    `,job.TenantID,job.JobID,step); err!=nil {
+        return err
+    }
+    if _,err=tx.Exec(ctx,`
+      UPDATE job_attempts
+      SET status='COMPLETED',completed_at=now(),last_error=NULL
+      WHERE tenant_id=$1 AND job_id=$2 AND step_name=$3 AND status='RUNNING'
+    `,job.TenantID,job.JobID,step); err!=nil {
+        return err
+    }
+    return tx.Commit(ctx)
+}
+
+func (w *Worker) trackStageTransition(ctx context.Context,job JobMessage,status string,completed bool) error {
+    switch status {
+    case "PREPROCESSING":
+        return w.startStage(ctx,job,"PREPROCESS")
+    case "OCR_PROCESSING":
+        if err:=w.completeStage(ctx,job,"PREPROCESS"); err!=nil { return err }
+        return w.startStage(ctx,job,"OCR")
+    case "OCR_COMPLETED":
+        return w.completeStage(ctx,job,"OCR")
+    case "TABLE_PROCESSING":
+        return w.startStage(ctx,job,"TABLE")
+    case "TABLES_COMPLETED":
+        return w.completeStage(ctx,job,"TABLE")
+    case "MAPPING":
+        return w.startStage(ctx,job,"MAPPING")
+    case "VALIDATING":
+        if err:=w.completeStage(ctx,job,"MAPPING"); err!=nil { return err }
+        return w.startStage(ctx,job,"VALIDATION")
+    default:
+        if completed {
+            if err:=w.completeStage(ctx,job,"VALIDATION"); err!=nil { return err }
+            if err:=w.startStage(ctx,job,"FINALIZE"); err!=nil { return err }
+            return w.completeStage(ctx,job,"FINALIZE")
+        }
+    }
+    return nil
 }
 
 func pageProgress(base,span,index,total int) int {
@@ -779,6 +874,7 @@ func (w *Worker) setStatus(ctx context.Context,job JobMessage,status string,comp
       WHERE id=$2 AND tenant_id=$3
     `,status,job.DocumentID,job.TenantID); err!=nil { return err }
 
+    if err:=w.trackStageTransition(ctx,job,status,completed); err!=nil { return err }
     return w.emitEvent(ctx,job,"status.changed",status,progress,nil,nil,nil)
 }
 
