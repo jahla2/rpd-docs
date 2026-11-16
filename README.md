@@ -10,8 +10,9 @@ Upload PDF/Image
 → C++ preprocessing
 → searchable-PDF text or RapidOCR
 → fast document classification from existing OCR/text JSON
+→ adaptive layout fingerprint + active profile match
 → type routing (invoice / supplier statement / bank statement)
-→ schema-driven financial extraction using OCR text, bounding boxes and table HTML
+→ schema-aware table crop + schema-driven extraction using OCR text, normalized bounding boxes and table geometry
 → unsupported types go to review, never invoice-by-default
 → header detection + configurable column mapping
 → canonical JSON + searchable PostgreSQL records
@@ -89,6 +90,19 @@ The current dynamic extraction router supports:
 
 Statements use the same OCR and RapidTable outputs already produced by the pipeline. Key fields retain OCR page/block/bounding-box evidence. Other classified document types remain safely routed to review until a schema is implemented.
 
+## Adaptive layout memory
+
+Validated financial documents generate a deterministic layout fingerprint from page orientation/aspect ratio, normalized anchor positions and table-header signatures. The runtime stores these profiles in PostgreSQL:
+
+- first successful unseen layout → `CANDIDATE`
+- second successful observation of the same fingerprint → `ACTIVE`
+- only `ACTIVE` profiles may influence extraction
+- active profiles can recover fields by learned normalized regions when a supplier changes a label but keeps the layout
+- portrait/landscape and resolution changes are handled through normalized coordinates
+- RapidTable cell boxes and logic points are preserved for future complex-table handling
+
+The hot path does not use a vector database or an LLM for layout retrieval. Profile matching is deterministic and bounded. Obsidian is not part of the runtime path; it remains a possible future human-readable import/export layer over the PostgreSQL registry.
+
 ## Local document classification
 
 The hot path is a cascade:
@@ -137,7 +151,7 @@ pip install "requests>=2.32,<3" "reportlab>=4.2,<5"
 make e2e
 ```
 
-The E2E smoke validates upload → canonical extraction → duplicate detection → reprocess → ERP import → reconciliation → export.
+The E2E smoke validates invoice → ERP reconciliation, supplier-statement auto-routing, and adaptive layout learning. It observes a landscape supplier layout twice, activates the profile, then verifies that a third document with a changed balance label is recovered from the learned normalized region.
 
 ## Reliability model
 
