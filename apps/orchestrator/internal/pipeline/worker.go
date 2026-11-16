@@ -60,6 +60,7 @@ type OCRResponse struct {
     DocumentID string `json:"document_id"`
     Page int `json:"page"`
     Engine string `json:"engine"`
+    Model *string `json:"model,omitempty"`
     Blocks []OCRBlock `json:"blocks"`
 }
 
@@ -216,6 +217,7 @@ func (w *Worker) HandlePreprocess(ctx context.Context, job JobMessage) error {
     pageOCR:=make(map[int]OCRResponse,native.PageCount)
 
     for index,page:=range native.Pages {
+        textStarted:=time.Now()
         var ocrBody []byte
         var ocr OCRResponse
 
@@ -249,6 +251,9 @@ func (w *Worker) HandlePreprocess(ctx context.Context, job JobMessage) error {
 
         if ocr.SchemaVersion!="1.0" {
             return w.fail(ctx,job,fmt.Errorf("unsupported text schema version %q on page %d",ocr.SchemaVersion,page.Page))
+        }
+        if err:=w.recordOCRRun(ctx,job,ocr,time.Since(textStarted).Milliseconds()); err!=nil {
+            return w.fail(ctx,job,fmt.Errorf("persist OCR provenance for page %d: %w",page.Page,err))
         }
 
         ocrDir:=filepath.Join(w.StorageRoot,"tenants",job.TenantID,"processing",job.DocumentID,job.RunID,"ocr")
@@ -582,6 +587,28 @@ func writeArtifactFile(dir,name string,data []byte)(string,error){
     return filepath.Abs(path)
 }
 
+func (w *Worker) recordOCRRun(ctx context.Context,job JobMessage,ocr OCRResponse,latencyMs int64) error {
+    engine:=strings.TrimSpace(ocr.Engine)
+    if engine=="" { engine="unknown" }
+    var model any
+    if ocr.Model!=nil && strings.TrimSpace(*ocr.Model)!="" { model=strings.TrimSpace(*ocr.Model) }
+
+    _,err:=w.DB.Exec(ctx,`
+      INSERT INTO ocr_runs
+        (tenant_id,document_id,job_id,run_id,page_number,engine,model,block_count,latency_ms,status,completed_at)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'COMPLETED',now())
+      ON CONFLICT (job_id,page_number)
+      DO UPDATE SET
+        engine=EXCLUDED.engine,
+        model=EXCLUDED.model,
+        block_count=EXCLUDED.block_count,
+        latency_ms=EXCLUDED.latency_ms,
+        status='COMPLETED',
+        completed_at=now()
+    `,job.TenantID,job.DocumentID,job.JobID,job.RunID,ocr.Page,engine,model,len(ocr.Blocks),latencyMs)
+    return err
+}
+
 func (w *Worker) persistCanonicalRecords(
     ctx context.Context,
     job JobMessage,
@@ -651,8 +678,8 @@ func (w *Worker) persistCanonicalRecords(
         if _,err=tx.Exec(ctx,`
           INSERT INTO extracted_fields
             (tenant_id,document_version_id,field_name,raw_value,normalized_value,data_type,
-             confidence,page_number,bbox_json,source_method,requires_review)
-          VALUES ($1,$2,$3,NULLIF($4,''),$5,$6,$7,$8,$9::jsonb,$10,$11)
+             confidence,page_number,bbox_json,evidence_json,source_method,requires_review)
+          VALUES ($1,$2,$3,NULLIF($4,''),$5,$6,$7,$8,NULL,$9::jsonb,$10,$11)
         `,job.TenantID,versionID,entry.Name,entry.Value.Raw,entry.Value.Value,entry.Type,
           confidence,page,string(evidenceJSON),sourceMethod,requiresReview); err!=nil {
             return err
