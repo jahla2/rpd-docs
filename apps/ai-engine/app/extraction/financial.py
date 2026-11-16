@@ -267,6 +267,7 @@ def _neighbor_candidate(
             continue
         lx1, ly1, lx2, ly2 = label_rect
         label_height = max(1.0, ly2 - ly1)
+        label_width = max(1.0, lx2 - lx1)
         same_page = [block for block in blocks if int(block.get("_page", 0)) == int(label.get("_page", 0))]
 
         right_candidates: list[tuple[float, dict[str, Any]]] = []
