@@ -10,7 +10,9 @@ from typing import Any
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from app.extraction.invoice import extract_invoice, extract_invoice_document\nfrom app.agents.invoice_resolver import apply_proposal, resolve_invoice\nfrom app.pdftext.poppler import parse_bbox_layout
+from app.extraction.invoice import extract_invoice, extract_invoice_document
+from app.agents.invoice_resolver import apply_proposal, resolve_invoice
+from app.pdftext.poppler import parse_bbox_layout
 from app.ocr.rapidocr_adapter import RapidOCREngine
 from app.tables.region import detect_table_region, translate_ocr_blocks
 from app.tables.slanet_adapter import SLANetTableEngine
@@ -44,6 +46,25 @@ class InvoiceExtractRequest(BaseModel):
     page: int = Field(default=1, ge=1)
     ocr_blocks: list[OCRBlockInput]
     table_html: str | None = None
+
+
+class PDFTextRequest(BaseModel):
+    document_id: str
+    page: int = Field(default=1, ge=1)
+    layout_path: str
+    image_path: str
+
+
+class InvoicePageInput(BaseModel):
+    page: int = Field(ge=1)
+    ocr_blocks: list[OCRBlockInput] = Field(default_factory=list)
+    table_html: str | None = None
+
+
+class InvoiceDocumentExtractRequest(BaseModel):
+    document_id: str
+    pages: list[InvoicePageInput]
+    mapping_config: dict[str, Any] | None = None
 
 
 @lru_cache(maxsize=1)
