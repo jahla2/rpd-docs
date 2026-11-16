@@ -279,8 +279,10 @@ def _neighbor_candidate(
                 continue
             cx1, cy1, cx2, cy2 = rect
             same_row = abs(((cy1 + cy2) / 2) - ((ly1 + ly2) / 2)) <= label_height * 1.25
-            if same_row and cx1 >= lx2 - 2:
-                right_candidates.append((max(0.0, cx1 - lx2), candidate))
+            right_gap = max(0.0, cx1 - lx2)
+            max_right_gap = max(120.0, label_width * 2.5)
+            if same_row and cx1 >= lx2 - 2 and right_gap <= max_right_gap:
+                right_candidates.append((right_gap, candidate))
 
             horizontal_overlap = max(0.0, min(lx2, cx2) - max(lx1, cx1))
             label_width = max(1.0, lx2 - lx1)
