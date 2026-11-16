@@ -552,6 +552,62 @@ def main() -> None:
         if ((adaptive_closing.get("evidence") or {}).get("method") or "") != "layout_profile_region":
             raise AssertionError(f"closing balance did not use learned region: {adaptive_closing}")
 
+        # Safe split transform must execute in the real extraction pipeline,
+        # not only in mapping preview.
+        split_template = api(
+            "POST",
+            "/api/v1/mapping-templates",
+            json={
+                "name": "e2e-split-runtime",
+                "document_type": "invoice",
+                "config": {
+                    "columns": [
+                        {
+                            "source_aliases": ["Invoice Number"],
+                            "target": "invoice_number",
+                            "type": "identifier",
+                            "required": True,
+                            "operations": [
+                                {
+                                    "operation": "split",
+                                    "config": {
+                                        "delimiter": "-",
+                                        "index": 1,
+                                        "trim": True,
+                                    },
+                                }
+                            ],
+                        }
+                    ]
+                },
+            },
+        ).json()
+        split_template_id = split_template["id"]
+        activated_split_template = api(
+            "POST",
+            f"/api/v1/mapping-templates/{split_template_id}/activate",
+        ).json()
+        if activated_split_template.get("status") != "ACTIVE":
+            raise AssertionError(f"split template activation failed: {activated_split_template}")
+
+        split_reprocess = api(
+            "POST",
+            f"/api/v1/documents/{document_id}/reprocess",
+            json={"mapping_template_id": split_template_id},
+        ).json()
+        wait_for_job(split_reprocess["job_id"])
+        split_result = api(
+            "GET",
+            f"/api/v1/documents/{document_id}/result",
+        ).json()
+        split_invoice_number = (
+            (split_result.get("invoice_number") or {}).get("value") or ""
+        ).strip()
+        if split_invoice_number != "001":
+            raise AssertionError(
+                f"split transform was not applied by runtime: {split_result}"
+            )
+
         print(
             json.dumps(
                 {
