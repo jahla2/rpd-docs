@@ -26,10 +26,14 @@ func (s *Server) createMappingTemplate(w http.ResponseWriter,r *http.Request){
         writeError(w,http.StatusBadRequest,"INVALID_MAPPING_TEMPLATE","invalid JSON body"); return
     }
     req.Name=strings.TrimSpace(req.Name)
-    req.DocumentType=strings.ToLower(strings.TrimSpace(req.DocumentType))
-    if req.Name=="" || req.DocumentType=="" || len(req.Config)==0 {
+    if req.Name=="" || strings.TrimSpace(req.DocumentType)=="" || len(req.Config)==0 {
         writeError(w,http.StatusBadRequest,"INVALID_MAPPING_TEMPLATE","name, document_type and config are required"); return
     }
+    documentType,ok:=normalizeDocumentType(req.DocumentType)
+    if !ok {
+        writeError(w,http.StatusBadRequest,"INVALID_DOCUMENT_TYPE","unsupported document_type"); return
+    }
+    req.DocumentType=documentType
 
     config,err:=mapping.ValidateTemplateConfig(req.Config)
     if err!=nil { writeError(w,http.StatusBadRequest,"INVALID_MAPPING_TEMPLATE",err.Error()); return }
@@ -69,7 +73,7 @@ func (s *Server) createMappingTemplateVersion(w http.ResponseWriter,r *http.Requ
     if err!=nil { writeError(w,http.StatusBadRequest,"INVALID_MAPPING_TEMPLATE",err.Error()); return }
     normalized,_:=json.Marshal(config)
 
-    actor:=strings.TrimSpace(r.Header.Get("X-Actor-ID"))
+    actor:=actorFrom(r)
     item,err:=s.store.CreateMappingTemplateVersion(
         r.Context(),tenantFrom(r,s.defaultTenantID),r.PathValue("id"),actor,normalized)
     if storeNotFound(err) { writeError(w,http.StatusNotFound,"NOT_FOUND","mapping template not found"); return }
