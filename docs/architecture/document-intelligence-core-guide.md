@@ -612,10 +612,12 @@ Non-goals for MVP: Kubernetes, dozens of microservices, fully autonomous financi
 - [x] optional ModernBERT INT8 ONNX low-confidence classifier fallback with warm readiness
 - [x] strict 3-second classification deadline with unknown/review degradation
 - [x] reproducible external model download with exact revision manifest
-- [x] local classifier p50/p95 latency benchmark harness
-- [ ] benchmark ModernBERT on representative private documents and target deployment hardware
+- [x] local classifier p50/p95 latency benchmark harness with corpus input and JSON reports
+- [x] classification evaluator with per-class precision/recall/F1, confusion matrix, review/coverage metrics and synthetic CI smoke corpus
+- [x] deployed API stage benchmark with PREPROCESS/OCR/CLASSIFY/TABLE/MAPPING/VALIDATION/FINALIZE p50/p95 from persisted job-step timestamps
+- [ ] benchmark ModernBERT on representative private documents on CPU and RTX 4060 target hardware
+- [ ] private labeled classification corpus representing production suppliers/document types
 - [ ] optional local Qwen/llama.cpp fallback behind a strict timeout
-- [ ] classification corpus with per-class precision/recall/F1
 - [x] dependency-aware readiness for PostgreSQL/storage/NATS/native/AI
 - [x] full Docker Compose runtime for API/orchestrator/reconciliation/AI/dependencies
 - [x] end-to-end CI: upload → canonical → duplicate/reprocess → ERP → reconciliation → export
