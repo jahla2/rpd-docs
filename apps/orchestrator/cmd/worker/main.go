@@ -8,6 +8,7 @@ import (
     "os/signal"
     "strconv"
     "syscall"
+    "time"
 
     "github.com/jackc/pgx/v5/pgxpool"
     "github.com/jahla2/rpd-docs/apps/orchestrator/internal/config"
@@ -47,13 +48,33 @@ func main() {
         }
         ctx,cancel:=context.WithCancel(context.Background())
         defer cancel()
+
+        heartbeatDone:=make(chan struct{})
+        go func(){
+            ticker:=time.NewTicker(15*time.Second)
+            defer ticker.Stop()
+            for {
+                select {
+                case <-heartbeatDone:
+                    return
+                case <-ticker.C:
+                    _=m.InProgress()
+                }
+            }
+        }()
+        defer close(heartbeatDone)
+
         if err:=worker.HandlePreprocess(ctx,job); err!=nil {
-            logger.Error("preprocess pipeline failed","error",err,"job_id",job.JobID,"document_id",job.DocumentID)
-            _=m.Nak()
+            deliveries:=uint64(1)
+            if metadata,metadataErr:=m.Metadata(); metadataErr==nil {
+                deliveries=metadata.NumDelivered
+            }
+            logger.Error("preprocess pipeline failed","error",err,"job_id",job.JobID,"document_id",job.DocumentID,"delivery",deliveries)
+            if deliveries<3 { _=m.Nak() } else { _=m.Term() }
             return
         }
         _=m.Ack()
-    },nats.Durable("rpd-preprocess"),nats.ManualAck(),nats.AckExplicit(),nats.MaxDeliver(3))
+    },nats.Durable("rpd-preprocess"),nats.ManualAck(),nats.AckExplicit(),nats.AckWait(60*time.Second),nats.MaxDeliver(3))
     if err!=nil { logger.Error("subscribe failed","error",err); os.Exit(1) }
 
     logger.Info("orchestrator_started","native_engine",cfg.NativeEnginePath,"ai_engine",cfg.AIEngineURL)
