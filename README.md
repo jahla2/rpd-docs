@@ -10,8 +10,9 @@ Upload PDF/Image
 → C++ preprocessing
 → searchable-PDF text or RapidOCR
 → fast document classification from existing OCR/text JSON
-→ type routing (unsupported extractors go to review, never invoice-by-default)
-→ RapidTable/SLANet only for routes that need table structure
+→ type routing (invoice / supplier statement / bank statement)
+→ schema-driven financial extraction using OCR text, bounding boxes and table HTML
+→ unsupported types go to review, never invoice-by-default
 → header detection + configurable column mapping
 → canonical JSON + searchable PostgreSQL records
 → ERP CSV/XLSX import
@@ -77,6 +78,16 @@ make up
 make logs
 make down
 ```
+
+## Supported financial extraction
+
+The current dynamic extraction router supports:
+
+- `invoice` — existing invoice fields/line items; successful documents become `READY_FOR_RECONCILIATION`
+- `supplier_statement` — supplier/date/currency/balances plus transaction rows; successful documents become `COMPLETED`
+- `bank_statement` — institution/account/period/currency/balances plus transaction rows; successful documents become `COMPLETED`
+
+Statements use the same OCR and RapidTable outputs already produced by the pipeline. Key fields retain OCR page/block/bounding-box evidence. Other classified document types remain safely routed to review until a schema is implemented.
 
 ## Local document classification
 
