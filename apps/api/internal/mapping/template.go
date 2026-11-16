@@ -63,6 +63,7 @@ var allowedOperations=map[string]bool{
     "default":true,
     "exclude":true,
     "split":true,
+    "combine":true,
 }
 
 func ValidateTemplateConfig(raw json.RawMessage)(TemplateConfig,error){
@@ -118,6 +119,24 @@ func ValidateTemplateConfig(raw json.RawMessage)(TemplateConfig,error){
                     return TemplateConfig{},fmt.Errorf(
                         "column %d operation %d split config: %w",
                         index,operationIndex,err)
+                }
+                config.Columns[index].Operations[operationIndex].Config=normalizedConfig
+            }
+            if op=="combine" {
+                normalizedConfig,err:=validateCombineConfig(operation.Config)
+                if err!=nil {
+                    return TemplateConfig{},fmt.Errorf(
+                        "column %d operation %d combine config: %w",
+                        index,operationIndex,err)
+                }
+                primaryAliases:=map[string]bool{}
+                for _,alias:=range aliases { primaryAliases[NormalizeHeader(alias)]=true }
+                for _,alias:=range normalizedConfig["with"].([]string) {
+                    if primaryAliases[NormalizeHeader(alias)] {
+                        return TemplateConfig{},fmt.Errorf(
+                            "column %d operation %d combine source %q duplicates primary source",
+                            index,operationIndex,alias)
+                    }
                 }
                 config.Columns[index].Operations[operationIndex].Config=normalizedConfig
             }
@@ -186,5 +205,73 @@ func validateSplitConfig(config map[string]any)(map[string]any,error){
         "delimiter":delimiter,
         "index":index,
         "trim":trim,
+    },nil
+}
+
+
+func validateCombineConfig(config map[string]any)(map[string]any,error){
+    if config==nil { return nil,fmt.Errorf("config is required") }
+    for key:=range config {
+        switch key {
+        case "with","separator","skip_empty":
+        default:
+            return nil,fmt.Errorf("unsupported key %q",key)
+        }
+    }
+
+    rawWith,ok:=config["with"]
+    if !ok { return nil,fmt.Errorf("with is required") }
+
+    aliases:=make([]string,0,8)
+    seen:=map[string]bool{}
+    appendAlias:=func(raw string) error {
+        alias:=strings.TrimSpace(raw)
+        normalized:=NormalizeHeader(alias)
+        if normalized=="" { return fmt.Errorf("with aliases must be non-empty strings") }
+        if len(alias)>200 { return fmt.Errorf("with alias must be at most 200 bytes") }
+        if !seen[normalized] {
+            seen[normalized]=true
+            aliases=append(aliases,alias)
+        }
+        return nil
+    }
+
+    switch values:=rawWith.(type) {
+    case []any:
+        for _,value:=range values {
+            alias,ok:=value.(string)
+            if !ok { return nil,fmt.Errorf("with must contain only strings") }
+            if err:=appendAlias(alias); err!=nil { return nil,err }
+        }
+    case []string:
+        for _,alias:=range values {
+            if err:=appendAlias(alias); err!=nil { return nil,err }
+        }
+    default:
+        return nil,fmt.Errorf("with must be an array of strings")
+    }
+    if len(aliases)==0 || len(aliases)>8 {
+        return nil,fmt.Errorf("with must contain between 1 and 8 unique aliases")
+    }
+
+    separator:=" "
+    if rawSeparator,exists:=config["separator"]; exists {
+        parsed,ok:=rawSeparator.(string)
+        if !ok { return nil,fmt.Errorf("separator must be a string") }
+        separator=parsed
+    }
+    if len(separator)>16 { return nil,fmt.Errorf("separator must be at most 16 bytes") }
+
+    skipEmpty:=false
+    if rawSkip,exists:=config["skip_empty"]; exists {
+        parsed,ok:=rawSkip.(bool)
+        if !ok { return nil,fmt.Errorf("skip_empty must be boolean") }
+        skipEmpty=parsed
+    }
+
+    return map[string]any{
+        "with":aliases,
+        "separator":separator,
+        "skip_empty":skipEmpty,
     },nil
 }
