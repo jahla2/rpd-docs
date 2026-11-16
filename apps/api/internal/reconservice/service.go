@@ -33,9 +33,17 @@ type Summary struct {
 
 type Service struct {
     Store *store.Store
+    ReadArtifact func(string)([]byte,error)
 }
 
-func New(st *store.Store)*Service { return &Service{Store:st} }
+func New(st *store.Store)*Service {
+    return &Service{Store:st,ReadArtifact:os.ReadFile}
+}
+
+func NewWithReader(st *store.Store,reader func(string)([]byte,error))*Service {
+    if reader==nil { reader=os.ReadFile }
+    return &Service{Store:st,ReadArtifact:reader}
+}
 
 func (s *Service) ExecuteQueuedRun(ctx context.Context,tenantID,runID string) error {
     state,err:=s.Store.GetReconciliationRunState(ctx,tenantID,runID)
@@ -151,7 +159,9 @@ func (s *Service) reconcileDocument(
     artifact,err:=s.Store.LatestCanonicalArtifact(ctx,tenantID,documentID)
     if err!=nil { return "",fmt.Errorf("canonical document %s: %w",documentID,err) }
 
-    data,err:=os.ReadFile(artifact.StorageURI)
+    reader:=s.ReadArtifact
+    if reader==nil { reader=os.ReadFile }
+    data,err:=reader(artifact.StorageURI)
     if err!=nil { return "",fmt.Errorf("read canonical document %s: %w",documentID,err) }
 
     var invoice canonical.Invoice
