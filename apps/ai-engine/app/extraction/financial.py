@@ -483,10 +483,11 @@ def _augment_result_evidence(result: dict[str, Any], pages: list[dict[str, Any]]
     page_map = _page_lookup(pages)
     blocks_by_page: dict[int, dict[str, dict[str, Any]]] = {}
     for page_number, page in page_map.items():
-        blocks_by_page[page_number] = {
-            str(block.get("block_id", "")): block
-            for block in page.get("ocr_blocks") or []
-        }
+        blocks_by_page[page_number] = {}
+        for source in page.get("ocr_blocks") or []:
+            block = dict(source)
+            block["_page"] = page_number
+            blocks_by_page[page_number][str(block.get("block_id", ""))] = block
 
     if isinstance(result.get("fields"), dict):
         field_values = result["fields"].values()
