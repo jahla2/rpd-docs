@@ -76,3 +76,77 @@ func TestValidateTemplateConfigRejectsUnsafeSplit(t *testing.T){
         }
     }
 }
+
+
+func TestValidateTemplateConfigAllowsSafeCombine(t *testing.T){
+    raw:=json.RawMessage(`{
+      "columns":[
+        {
+          "source_aliases":["First Name"],
+          "target":"supplier_name",
+          "type":"string",
+          "operations":[
+            {
+              "operation":"combine",
+              "config":{"with":["Last Name"],"separator":" ","skip_empty":false}
+            }
+          ]
+        }
+      ]
+    }`)
+    config,err:=ValidateTemplateConfig(raw)
+    if err!=nil { t.Fatal(err) }
+    combine:=config.Columns[0].Operations[0]
+    if combine.Operation!="combine" { t.Fatalf("operation=%q",combine.Operation) }
+    aliases,ok:=combine.Config["with"].([]string)
+    if !ok || len(aliases)!=1 || aliases[0]!="Last Name" {
+        t.Fatalf("config=%#v",combine.Config)
+    }
+    if combine.Config["separator"]!=" " || combine.Config["skip_empty"]!=false {
+        t.Fatalf("config=%#v",combine.Config)
+    }
+}
+
+func TestValidateTemplateConfigRejectsUnsafeCombine(t *testing.T){
+    cases:=[]string{
+        `{}`,
+        `{"with":[]}`,
+        `{"with":["Last Name"],"separator":"0123456789abcdefg"}`,
+        `{"with":["Last Name"],"skip_empty":"yes"}`,
+        `{"with":["Last Name"],"expression":"exec()"}`,
+        `{"with":[1]}`,
+    }
+    for _,combineConfig:=range cases {
+        raw:=json.RawMessage(`{
+          "columns":[
+            {
+              "source_aliases":["First Name"],
+              "target":"supplier_name",
+              "type":"string",
+              "operations":[{"operation":"combine","config":`+combineConfig+`}]
+            }
+          ]
+        }`)
+        if _,err:=ValidateTemplateConfig(raw); err==nil {
+            t.Fatalf("expected combine config to fail: %s",combineConfig)
+        }
+    }
+}
+
+func TestValidateTemplateConfigRejectsCombinePrimarySourceReuse(t *testing.T){
+    raw:=json.RawMessage(`{
+      "columns":[
+        {
+          "source_aliases":["First Name"],
+          "target":"supplier_name",
+          "type":"string",
+          "operations":[
+            {"operation":"combine","config":{"with":["First Name"]}}
+          ]
+        }
+      ]
+    }`)
+    if _,err:=ValidateTemplateConfig(raw); err==nil {
+        t.Fatal("expected primary source reuse to fail")
+    }
+}
