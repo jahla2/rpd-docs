@@ -70,7 +70,12 @@ func main() {
                 deliveries=metadata.NumDelivered
             }
             logger.Error("preprocess pipeline failed","error",err,"job_id",job.JobID,"document_id",job.DocumentID,"delivery",deliveries)
-            if deliveries<3 { _=m.Nak() } else { _=m.Term() }
+            if deliveries<3 {
+                _=worker.MarkRetrying(context.Background(),job,err)
+                _=m.Nak()
+            } else {
+                _=m.Term()
+            }
             return
         }
         _=m.Ack()
