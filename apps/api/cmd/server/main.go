@@ -13,6 +13,7 @@ import (
     "github.com/jahla2/rpd-docs/apps/api/internal/auth"
     "github.com/jahla2/rpd-docs/apps/api/internal/config"
     "github.com/jahla2/rpd-docs/apps/api/internal/httpapi"
+    "github.com/jahla2/rpd-docs/apps/api/internal/outbox"
     "github.com/jahla2/rpd-docs/apps/api/internal/queue"
     "github.com/jahla2/rpd-docs/apps/api/internal/storage"
     "github.com/jahla2/rpd-docs/apps/api/internal/store"
@@ -38,6 +39,11 @@ func main() {
         logger.Error("API_KEY_PEPPER is required when authentication is enabled")
         os.Exit(1)
     }
+    outboxCtx,cancelOutbox:=context.WithCancel(context.Background())
+    defer cancelOutbox()
+    dispatcher:=&outbox.Dispatcher{Store:st,Queue:q,Logger:logger}
+    go dispatcher.Run(outboxCtx)
+
     handler:=httpapi.New(st,storageManager,q,cfg.DefaultTenantID,cfg.APIKeyPepper,logger)
     handler=auth.Middleware{Store:st,Mode:cfg.AuthMode,Pepper:cfg.APIKeyPepper,Logger:logger,Limiter:auth.NewRateLimiter(cfg.RateLimitRPS,cfg.RateLimitBurst)}.Wrap(handler)
     srv:=&http.Server{
@@ -52,6 +58,7 @@ func main() {
         }
     }()
     stop:=make(chan os.Signal,1); signal.Notify(stop,syscall.SIGINT,syscall.SIGTERM); <-stop
+    cancelOutbox()
     ctx,cancel:=context.WithTimeout(context.Background(),15*time.Second); defer cancel()
     _=srv.Shutdown(ctx)
 }
