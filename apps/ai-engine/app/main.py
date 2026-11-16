@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 
 from app.extraction.invoice import extract_invoice, extract_invoice_document
 from app.agents.invoice_resolver import apply_proposal, resolve_invoice
-from app.classification.rules import classify_document
+from app.classification.service import classification_service
 from app.pdftext.poppler import parse_bbox_layout
 from app.ocr.rapidocr_adapter import RapidOCREngine
 from app.tables.region import detect_table_region, translate_ocr_blocks
@@ -99,12 +99,13 @@ def live() -> dict:
 def ready() -> dict:
     rapidocr_available = importlib.util.find_spec("rapidocr") is not None
     rapidtable_available = importlib.util.find_spec("rapid_table") is not None
+    classifier = classification_service().health()
     return {
-        "ready": rapidocr_available and rapidtable_available,
+        "ready": rapidocr_available and rapidtable_available and bool(classifier.get("ready")),
         "checks": {
             "rapidocr": rapidocr_available,
             "rapid_table": rapidtable_available,
-            "classification_rules": True,
+            "document_classifier": classifier,
         },
     }
 
@@ -113,7 +114,7 @@ def ready() -> dict:
 def run_classification(request: ClassificationRequest) -> dict[str, Any]:
     if not request.pages:
         raise HTTPException(status_code=400, detail="pages must not be empty")
-    return classify_document(
+    return classification_service().classify(
         document_id=request.document_id,
         pages=[
             {
