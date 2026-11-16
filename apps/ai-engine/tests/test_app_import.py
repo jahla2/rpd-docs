@@ -9,6 +9,7 @@ def test_fastapi_application_imports_and_registers_core_routes() -> None:
         "/health/ready",
         "/v1/ocr",
         "/v1/classify",
+        "/v1/layout/match",
         "/v1/pdftext",
         "/v1/tables",
         "/v1/extract/invoice",
