@@ -93,6 +93,17 @@ type ClassificationResponse struct {
     RequiresReview bool `json:"requires_review"`
 }
 
+type LayoutMatchResponse struct {
+    SchemaVersion string `json:"schema_version"`
+    Fingerprint map[string]any `json:"fingerprint"`
+    FingerprintHash string `json:"fingerprint_hash"`
+    Matched bool `json:"matched"`
+    MatchedProfileID string `json:"matched_profile_id"`
+    MatchedProfileName string `json:"matched_profile_name"`
+    Score float64 `json:"score"`
+    Config map[string]any `json:"config"`
+}
+
 type CanonicalResponse struct {
     SchemaVersion string `json:"schema_version"`
     DocumentID string `json:"document_id"`
@@ -104,6 +115,7 @@ type CanonicalEvidence struct {
     Page int `json:"page"`
     BlockIDs []string `json:"block_ids"`
     BBox []float64 `json:"bbox,omitempty"`
+    BBoxNormalized []float64 `json:"bbox_normalized,omitempty"`
     Method string `json:"method"`
     Confidence float64 `json:"confidence"`
 }
@@ -136,8 +148,11 @@ type CanonicalGenericDocument struct {
 
 type pageExtraction struct {
     Page int `json:"page"`
+    ImagePath string `json:"image_path,omitempty"`
     OCRBlocks []OCRBlock `json:"ocr_blocks"`
     TableHTML *string `json:"table_html"`
+    TableCellBBoxes any `json:"table_cell_bboxes,omitempty"`
+    TableLogicPoints any `json:"table_logic_points,omitempty"`
 }
 
 type Worker struct {
@@ -375,6 +390,49 @@ func (w *Worker) HandlePreprocess(ctx context.Context, job JobMessage) error {
         return w.finalizeUnsupportedDocument(ctx,job,native.PageCount,classification)
     }
 
+    layoutProfiles,profileErr:=w.loadActiveLayoutProfiles(ctx,job.TenantID,classification.DocumentType)
+    if profileErr!=nil {
+        w.Logger.Warn("layout_profiles_unavailable","error",profileErr,"document_type",classification.DocumentType)
+        layoutProfiles=[]map[string]any{}
+    }
+    layoutPages:=make([]map[string]any,0,native.PageCount)
+    for _,page:=range native.Pages {
+        layoutPages=append(layoutPages,map[string]any{
+            "page":page.Page,
+            "image_path":page.ImageArtifact,
+            "ocr_blocks":pageOCR[page.Page].Blocks,
+        })
+    }
+    layoutMatch:=LayoutMatchResponse{
+        SchemaVersion:"1.0",
+        Fingerprint:map[string]any{},
+        Config:map[string]any{},
+    }
+    layoutBody,layoutErr:=w.postJSON(ctx,"/v1/layout/match",map[string]any{
+        "document_id":job.DocumentID,
+        "document_type":classification.DocumentType,
+        "pages":layoutPages,
+        "profiles":layoutProfiles,
+    })
+    if layoutErr!=nil {
+        w.Logger.Warn("layout_match_skipped","error",layoutErr,"document_id",job.DocumentID)
+    } else if err:=json.Unmarshal(layoutBody,&layoutMatch); err!=nil {
+        w.Logger.Warn("layout_match_decode_failed","error",err,"document_id",job.DocumentID)
+    } else {
+        layoutDir:=filepath.Join(w.StorageRoot,"tenants",job.TenantID,"processing",job.DocumentID,job.RunID,"layout")
+        layoutPath,writeErr:=writeArtifactFile(layoutDir,"layout-match.json",layoutBody)
+        if writeErr==nil {
+            _=w.addArtifact(ctx,job,"LAYOUT_MATCH_JSON",layoutPath,strPtr("application/json"))
+        }
+        _=w.emitEvent(ctx,job,"document.layout_matched","CLASSIFIED",49,nil,&native.PageCount,map[string]any{
+            "matched":layoutMatch.Matched,
+            "profile_id":layoutMatch.MatchedProfileID,
+            "profile_name":layoutMatch.MatchedProfileName,
+            "score":layoutMatch.Score,
+            "fingerprint_hash":layoutMatch.FingerprintHash,
+        })
+    }
+
     if err:=w.setStatus(ctx,job,"TABLE_PROCESSING",false,50); err!=nil { return w.fail(ctx,job,err) }
 
     for index,page:=range native.Pages {
@@ -388,6 +446,8 @@ func (w *Worker) HandlePreprocess(ctx context.Context, job JobMessage) error {
                 "image_path":page.ImageArtifact,
                 "ocr_blocks":ocr.Blocks,
                 "auto_crop":true,
+                "document_type":classification.DocumentType,
+                "layout_config":layoutMatch.Config,
             })
             if tableErr!=nil {
                 return w.fail(ctx,job,fmt.Errorf("page %d table recognition: %w",page.Page,tableErr))
@@ -422,8 +482,11 @@ func (w *Worker) HandlePreprocess(ctx context.Context, job JobMessage) error {
 
         extractions=append(extractions,pageExtraction{
             Page:page.Page,
+            ImagePath:page.ImageArtifact,
             OCRBlocks:ocr.Blocks,
             TableHTML:table.PredHTML,
+            TableCellBBoxes:table.CellBBoxes,
+            TableLogicPoints:table.LogicPoints,
         })
 
         pageNumber:=page.Page
@@ -438,6 +501,7 @@ func (w *Worker) HandlePreprocess(ctx context.Context, job JobMessage) error {
         "document_id":job.DocumentID,
         "document_type":classification.DocumentType,
         "pages":extractions,
+        "layout_match":layoutMatch,
     }
     if mappingConfig,ok:=job.Options["mapping_config"]; ok {
         extractPayload["mapping_config"]=mappingConfig
@@ -512,6 +576,12 @@ func (w *Worker) HandlePreprocess(ctx context.Context, job JobMessage) error {
     }
 
     requiresReview:=canonical.RequiresReview || validationResult.RequiresReview
+    if !requiresReview && validationResult.Valid {
+        if err:=w.observeLayoutProfile(ctx,job,canonical.DocumentType,canonicalBody,layoutMatch); err!=nil {
+            w.Logger.Warn("layout_profile_observation_failed","error",err,"document_id",job.DocumentID)
+        }
+    }
+
     finalStatus:="READY_FOR_RECONCILIATION"
     eventType:="document.completed"
     if canonical.DocumentType!="invoice" {
