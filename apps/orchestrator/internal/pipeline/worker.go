@@ -81,6 +81,33 @@ type CanonicalResponse struct {
     RequiresReview bool `json:"requires_review"`
 }
 
+type CanonicalEvidence struct {
+    Page int `json:"page"`
+    BlockIDs []string `json:"block_ids"`
+    Method string `json:"method"`
+    Confidence float64 `json:"confidence"`
+}
+
+type CanonicalField struct {
+    Raw string `json:"raw"`
+    Value string `json:"value"`
+    Evidence CanonicalEvidence `json:"evidence"`
+}
+
+type CanonicalInvoiceDocument struct {
+    SupplierName *CanonicalField `json:"supplier_name"`
+    SupplierCode *CanonicalField `json:"supplier_code"`
+    InvoiceNumber *CanonicalField `json:"invoice_number"`
+    InvoiceDate *CanonicalField `json:"invoice_date"`
+    DueDate *CanonicalField `json:"due_date"`
+    PONumber *CanonicalField `json:"po_number"`
+    Currency *CanonicalField `json:"currency"`
+    Subtotal *CanonicalField `json:"subtotal"`
+    Tax *CanonicalField `json:"tax"`
+    GrandTotal *CanonicalField `json:"grand_total"`
+    LineItems []map[string]any `json:"line_items"`
+}
+
 type pageExtraction struct {
     Page int `json:"page"`
     OCRBlocks []OCRBlock `json:"ocr_blocks"`
@@ -357,6 +384,10 @@ func (w *Worker) HandlePreprocess(ctx context.Context, job JobMessage) error {
     versionID,versionNumber,err:=w.createDocumentVersion(ctx,job,canonical.DocumentType)
     if err!=nil { return w.fail(ctx,job,err) }
 
+    if err:=w.persistCanonicalRecords(ctx,job,versionID,canonicalBody,validationResult); err!=nil {
+        return w.fail(ctx,job,fmt.Errorf("persist canonical records: %w",err))
+    }
+
     finalDir:=filepath.Join(w.StorageRoot,"tenants",job.TenantID,"documents",job.DocumentID,versionID)
     canonicalPath,err:=writeArtifactFile(finalDir,"canonical.json",canonicalBody)
     if err!=nil { return w.fail(ctx,job,err) }
@@ -549,6 +580,109 @@ func writeArtifactFile(dir,name string,data []byte)(string,error){
     path:=filepath.Join(dir,name)
     if err:=os.WriteFile(path,data,0o640); err!=nil { return "",err }
     return filepath.Abs(path)
+}
+
+func (w *Worker) persistCanonicalRecords(
+    ctx context.Context,
+    job JobMessage,
+    versionID string,
+    canonicalBody []byte,
+    validationResult validation.Result,
+) error {
+    var invoice CanonicalInvoiceDocument
+    if err:=json.Unmarshal(canonicalBody,&invoice); err!=nil { return err }
+
+    tx,err:=w.DB.Begin(ctx)
+    if err!=nil { return err }
+    defer tx.Rollback(ctx)
+
+    if _,err=tx.Exec(ctx,`
+      DELETE FROM extracted_fields
+      WHERE tenant_id=$1 AND document_version_id=$2
+    `,job.TenantID,versionID); err!=nil {
+        return err
+    }
+    if _,err=tx.Exec(ctx,`
+      DELETE FROM document_line_items
+      WHERE tenant_id=$1 AND document_version_id=$2
+    `,job.TenantID,versionID); err!=nil {
+        return err
+    }
+    if _,err=tx.Exec(ctx,`
+      DELETE FROM validation_results
+      WHERE tenant_id=$1 AND document_version_id=$2
+    `,job.TenantID,versionID); err!=nil {
+        return err
+    }
+
+    fields:=[]struct{
+        Name string
+        Type string
+        Value *CanonicalField
+    }{
+        {"supplier_name","string",invoice.SupplierName},
+        {"supplier_code","identifier",invoice.SupplierCode},
+        {"invoice_number","identifier",invoice.InvoiceNumber},
+        {"invoice_date","date",invoice.InvoiceDate},
+        {"due_date","date",invoice.DueDate},
+        {"po_number","identifier",invoice.PONumber},
+        {"currency","currency",invoice.Currency},
+        {"subtotal","decimal",invoice.Subtotal},
+        {"tax","decimal",invoice.Tax},
+        {"grand_total","decimal",invoice.GrandTotal},
+    }
+
+    for _,entry:=range fields {
+        if entry.Value==nil || strings.TrimSpace(entry.Value.Value)=="" { continue }
+        sourceMethod:=strings.TrimSpace(entry.Value.Evidence.Method)
+        if sourceMethod=="" { sourceMethod="deterministic_extraction" }
+        requiresReview:=entry.Value.Evidence.Confidence>0 && entry.Value.Evidence.Confidence<0.70
+
+        var confidence any
+        if entry.Value.Evidence.Confidence>0 { confidence=entry.Value.Evidence.Confidence }
+        var page any
+        if entry.Value.Evidence.Page>0 { page=entry.Value.Evidence.Page }
+
+        evidenceJSON,_:=json.Marshal(map[string]any{
+            "block_ids":entry.Value.Evidence.BlockIDs,
+            "method":sourceMethod,
+        })
+
+        if _,err=tx.Exec(ctx,`
+          INSERT INTO extracted_fields
+            (tenant_id,document_version_id,field_name,raw_value,normalized_value,data_type,
+             confidence,page_number,bbox_json,source_method,requires_review)
+          VALUES ($1,$2,$3,NULLIF($4,''),$5,$6,$7,$8,$9::jsonb,$10,$11)
+        `,job.TenantID,versionID,entry.Name,entry.Value.Raw,entry.Value.Value,entry.Type,
+          confidence,page,string(evidenceJSON),sourceMethod,requiresReview); err!=nil {
+            return err
+        }
+    }
+
+    for index,item:=range invoice.LineItems {
+        encoded,marshalErr:=json.Marshal(item)
+        if marshalErr!=nil { return marshalErr }
+        if _,err=tx.Exec(ctx,`
+          INSERT INTO document_line_items
+            (tenant_id,document_version_id,row_number,data_json,requires_review)
+          VALUES ($1,$2,$3,$4::jsonb,false)
+        `,job.TenantID,versionID,index+1,string(encoded)); err!=nil {
+            return err
+        }
+    }
+
+    for _,rule:=range validationResult.Rules {
+        evidence,_:=json.Marshal(rule.Evidence)
+        if _,err=tx.Exec(ctx,`
+          INSERT INTO validation_results
+            (tenant_id,document_version_id,rule_code,status,severity,message,evidence_json)
+          VALUES ($1,$2,$3,$4,$5,NULLIF($6,''),$7::jsonb)
+        `,job.TenantID,versionID,rule.Code,rule.Status,rule.Severity,rule.Message,string(evidence)); err!=nil {
+            return err
+        }
+    }
+
+    return tx.Commit(ctx)
 }
 
 func (w *Worker) createDocumentVersion(ctx context.Context,job JobMessage,documentType string)(string,int,error){
