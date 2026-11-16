@@ -670,15 +670,15 @@ Build vertical slices:
 4. Build/match adaptive layout fingerprint.
 5. Supported financial route → schema-aware table → schema-driven canonical extraction.
 6. Document-type validation.
-6. ERP import → exact reconciliation.
-7. Tolerance → review → export.
-8. Agentic fallback.
+7. ERP import → exact reconciliation.
+8. Tolerance → review → export.
+9. Agentic fallback.
 
 ## 18. Definition of MVP done
 
 A scanned invoice can be uploaded, stored immutably, preprocessed, OCR'd, classified, routed to the invoice extractor, table-extracted, mapped to canonical invoice JSON, validated, reconciled against imported ERP data, reviewed when uncertain, and exported with an auditable evidence trail. Documents classified as unsupported or unknown are preserved and routed to review rather than being forced through invoice extraction.
 
-The reliable MVP path is now continuously exercised in CI through the full Docker Compose stack. The smoke test also verifies duplicate detection and immutable reprocessing before ERP reconciliation/export. Remaining unchecked work in this guide requires representative private data, production-like infrastructure, operational drills, or external security validation rather than additional core MVP business-flow code.
+The reliable MVP path is now continuously exercised in CI through the full Docker Compose stack. The smoke test also verifies duplicate detection, immutable reprocessing, supplier-statement auto-routing, and adaptive supplier-layout learning/reuse before ERP reconciliation/export. Remaining unchecked work in this guide requires representative private data, production-like infrastructure, operational drills, or external security validation rather than additional core MVP business-flow code.
 
 ## 19. Quality and observability
 
