@@ -147,3 +147,78 @@ def test_split_can_feed_multiple_targets_from_one_source_column():
     assert items[0]["supplier_code"] == "SUP001"
     assert items[0]["invoice_number"] == "INV100"
     assert items[0]["line_total"] == "100.00"
+
+
+
+def test_combine_operation_uses_same_table_row_context():
+    html = """
+    <table>
+      <tr><th>Item Name</th><th>Variant</th><th>Line Total</th></tr>
+      <tr><td>Paper</td><td>Blue</td><td>100.00</td></tr>
+    </table>
+    """
+    config = {
+        "columns": [
+            {
+                "source_aliases": ["Item Name"],
+                "target": "description",
+                "type": "string",
+                "operations": [
+                    {
+                        "operation": "combine",
+                        "config": {
+                            "with": ["Variant"],
+                            "separator": " / ",
+                            "skip_empty": False,
+                        },
+                    }
+                ],
+            },
+            {
+                "source_aliases": ["Line Total"],
+                "target": "line_total",
+                "type": "decimal",
+                "operations": [{"operation": "decimal"}],
+            },
+        ]
+    }
+    items, _ = extract_line_items(html, config)
+    assert items[0]["description"] == "Paper / Blue"
+    assert items[0]["line_total"] == "100.00"
+
+
+def test_combine_operation_missing_required_source_fails_closed():
+    html = """
+    <table>
+      <tr><th>Item Name</th><th>Line Total</th></tr>
+      <tr><td>Paper</td><td>100.00</td></tr>
+    </table>
+    """
+    config = {
+        "columns": [
+            {
+                "source_aliases": ["Item Name"],
+                "target": "description",
+                "type": "string",
+                "operations": [
+                    {
+                        "operation": "combine",
+                        "config": {
+                            "with": ["Variant"],
+                            "separator": " / ",
+                            "skip_empty": False,
+                        },
+                    }
+                ],
+            },
+            {
+                "source_aliases": ["Line Total"],
+                "target": "line_total",
+                "type": "decimal",
+                "operations": [{"operation": "decimal"}],
+            },
+        ]
+    }
+    items, _ = extract_line_items(html, config)
+    assert "description" not in items[0]
+    assert items[0]["line_total"] == "100.00"
