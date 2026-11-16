@@ -45,6 +45,15 @@ type Job struct {
     CompletedAt *time.Time `json:"completed_at,omitempty"`
 }
 
+type JobStep struct {
+    StepName string `json:"step_name"`
+    Status string `json:"status"`
+    AttemptCount int `json:"attempt_count"`
+    StartedAt *time.Time `json:"started_at,omitempty"`
+    CompletedAt *time.Time `json:"completed_at,omitempty"`
+    LastError *string `json:"last_error,omitempty"`
+}
+
 type Artifact struct {
     ID string `json:"id"`
     ArtifactType string `json:"artifact_type"`
@@ -112,6 +121,27 @@ func (s *Store) GetJob(ctx context.Context, tenantID,id string) (Job,error) {
     `,tenantID,id).Scan(&j.ID,&j.TenantID,&j.DocumentID,&j.RunID,&j.Status,
       &j.CreatedAt,&j.StartedAt,&j.CompletedAt)
     return j,err
+}
+
+func (s *Store) ListJobSteps(ctx context.Context,tenantID,jobID string)([]JobStep,error){
+    rows,err:=s.pool.Query(ctx,`
+      SELECT step_name,status,attempt_count,started_at,completed_at,last_error
+      FROM job_steps
+      WHERE tenant_id=$1 AND job_id=$2
+      ORDER BY started_at NULLS LAST,step_name
+    `,tenantID,jobID)
+    if err!=nil { return nil,err }
+    defer rows.Close()
+
+    out:=make([]JobStep,0)
+    for rows.Next(){
+        var step JobStep
+        if err:=rows.Scan(&step.StepName,&step.Status,&step.AttemptCount,&step.StartedAt,&step.CompletedAt,&step.LastError); err!=nil {
+            return nil,err
+        }
+        out=append(out,step)
+    }
+    return out,rows.Err()
 }
 
 func (s *Store) LatestCanonicalArtifact(ctx context.Context,tenantID,documentID string)(Artifact,error){
