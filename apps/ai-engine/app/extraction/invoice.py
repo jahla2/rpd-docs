@@ -132,7 +132,29 @@ def parse_table_html(html: str | None) -> list[list[str]]:
     return parser.rows
 
 
-def _apply_operations(value: str, operations: list[dict]) -> tuple[str | None, bool]:
+def _combine_aliases(raw: object) -> list[str] | None:
+    if not isinstance(raw, list) or not 1 <= len(raw) <= 8:
+        return None
+    aliases: list[str] = []
+    seen: set[str] = set()
+    for value in raw:
+        if not isinstance(value, str):
+            return None
+        alias = value.strip()
+        normalized = normalize_header(alias)
+        if not normalized or len(alias.encode("utf-8")) > 200:
+            return None
+        if normalized not in seen:
+            seen.add(normalized)
+            aliases.append(alias)
+    return aliases if aliases else None
+
+
+def _apply_operations(
+    value: str,
+    operations: list[dict],
+    context: dict[str, str] | None = None,
+) -> tuple[str | None, bool]:
     current: str | None = value
     excluded = False
     for operation in operations:
@@ -178,6 +200,31 @@ def _apply_operations(value: str, operations: list[dict]) -> tuple[str | None, b
             current = parts[index]
             if trim:
                 current = current.strip()
+        elif name == "combine" and current is not None:
+            aliases = _combine_aliases(config.get("with"))
+            separator = config.get("separator", " ")
+            skip_empty = config.get("skip_empty", False)
+            if (
+                aliases is None
+                or not isinstance(separator, str)
+                or len(separator.encode("utf-8")) > 16
+                or not isinstance(skip_empty, bool)
+            ):
+                current = None
+                continue
+
+            parts = [current]
+            source_context = context or {}
+            failed = False
+            for alias in aliases:
+                additional = source_context.get(normalize_header(alias))
+                if additional is None or additional.strip() == "":
+                    if skip_empty:
+                        continue
+                    failed = True
+                    break
+                parts.append(additional.strip())
+            current = None if failed else separator.join(parts)
     return current, excluded
 
 
@@ -210,9 +257,17 @@ def extract_line_items(table_html: str | None, mapping_config: dict | None = Non
     if header_index is None:
         return [], {"header_row": None, "mapped_headers": {}}
 
+    header_row = rows[header_index]
     items: list[dict] = []
     for row in rows[header_index + 1 :]:
         item: dict[str, str] = {}
+        row_context = {
+            normalize_header(header): (
+                row[column_index].strip() if column_index < len(row) else ""
+            )
+            for column_index, header in enumerate(header_row)
+            if normalize_header(header)
+        }
         for column_index, targets in header_map.items():
             if column_index >= len(row):
                 continue
@@ -229,14 +284,19 @@ def extract_line_items(table_html: str | None, mapping_config: dict | None = Non
                             break
 
                 operations = list((column_rule or {}).get("operations") or [])
-                transformed, excluded = _apply_operations(value, operations)
+                transformed, excluded = _apply_operations(
+                    value,
+                    operations,
+                    row_context,
+                )
                 if excluded:
                     continue
-                strict_split = any(
-                    str(operation.get("operation", "")).strip().lower() == "split"
+                strict_transform = any(
+                    str(operation.get("operation", "")).strip().lower()
+                    in {"split", "combine"}
                     for operation in operations
                 )
-                if strict_split and transformed is None:
+                if strict_transform and transformed is None:
                     continue
 
                 if target in {"quantity", "unit_price", "tax", "line_total"} and not operations:
@@ -307,6 +367,25 @@ def _column_rule(mapping_config: dict | None, target: str) -> dict | None:
     return None
 
 
+def _extract_alias_value(blocks: list[dict], alias_text: str) -> str | None:
+    alias_text = alias_text.strip()
+    if not alias_text:
+        return None
+    escaped = re.escape(alias_text).replace(r"\ ", r"\s+")
+    pattern = re.compile(
+        rf"(?:^|\b){escaped}\s*[:#-]?\s*(.+)$",
+        re.IGNORECASE,
+    )
+    for block in blocks:
+        text = str(block.get("text", "")).strip()
+        match = pattern.search(text)
+        if match:
+            value = match.group(1).strip()
+            if value:
+                return value
+    return None
+
+
 def _search_alias(
     blocks: list[dict],
     target: str,
@@ -336,17 +415,31 @@ def _search_alias(
                 continue
             raw_value = match.group(1).strip()
             operations = list(rule.get("operations") or [])
+            operation_context: dict[str, str] = {}
+            for operation in operations:
+                if str(operation.get("operation", "")).strip().lower() != "combine":
+                    continue
+                aliases = _combine_aliases((operation.get("config") or {}).get("with"))
+                if aliases is None:
+                    continue
+                for combine_alias in aliases:
+                    additional = _extract_alias_value(blocks, combine_alias)
+                    if additional is not None:
+                        operation_context[normalize_header(combine_alias)] = additional
+
             transformed, excluded = _apply_operations(
                 raw_value,
                 operations,
+                operation_context,
             )
             if excluded:
                 return None
-            strict_split = any(
-                str(operation.get("operation", "")).strip().lower() == "split"
+            strict_transform = any(
+                str(operation.get("operation", "")).strip().lower()
+                in {"split", "combine"}
                 for operation in operations
             )
-            if strict_split and transformed is None:
+            if strict_transform and transformed is None:
                 continue
             value = transformed
             if value is None:
