@@ -627,6 +627,64 @@ def main() -> None:
                 f"multi-target split was not applied by runtime: {split_result}"
             )
 
+        # Safe combine transform must resolve only explicitly named source
+        # aliases from the same OCR document.
+        combine_template = api(
+            "POST",
+            "/api/v1/mapping-templates",
+            json={
+                "name": "e2e-combine-runtime",
+                "document_type": "invoice",
+                "config": {
+                    "columns": [
+                        {
+                            "source_aliases": ["Invoice Number"],
+                            "target": "po_number",
+                            "type": "identifier",
+                            "required": False,
+                            "operations": [
+                                {
+                                    "operation": "combine",
+                                    "config": {
+                                        "with": ["Currency"],
+                                        "separator": "|",
+                                        "skip_empty": False,
+                                    },
+                                }
+                            ],
+                        }
+                    ]
+                },
+            },
+        ).json()
+        combine_template_id = combine_template["id"]
+        activated_combine_template = api(
+            "POST",
+            f"/api/v1/mapping-templates/{combine_template_id}/activate",
+        ).json()
+        if activated_combine_template.get("status") != "ACTIVE":
+            raise AssertionError(
+                f"combine template activation failed: {activated_combine_template}"
+            )
+
+        combine_reprocess = api(
+            "POST",
+            f"/api/v1/documents/{document_id}/reprocess",
+            json={"mapping_template_id": combine_template_id},
+        ).json()
+        wait_for_job(combine_reprocess["job_id"])
+        combine_result = api(
+            "GET",
+            f"/api/v1/documents/{document_id}/result",
+        ).json()
+        combine_po_number = (
+            (combine_result.get("po_number") or {}).get("value") or ""
+        ).strip()
+        if combine_po_number != "INV-001|PHP":
+            raise AssertionError(
+                f"combine transform was not applied by runtime: {combine_result}"
+            )
+
         print(
             json.dumps(
                 {
