@@ -564,6 +564,22 @@ def main() -> None:
                     "columns": [
                         {
                             "source_aliases": ["Invoice Number"],
+                            "target": "po_number",
+                            "type": "identifier",
+                            "required": False,
+                            "operations": [
+                                {
+                                    "operation": "split",
+                                    "config": {
+                                        "delimiter": "-",
+                                        "index": 0,
+                                        "trim": True,
+                                    },
+                                }
+                            ],
+                        },
+                        {
+                            "source_aliases": ["Invoice Number"],
                             "target": "invoice_number",
                             "type": "identifier",
                             "required": True,
@@ -603,9 +619,12 @@ def main() -> None:
         split_invoice_number = (
             (split_result.get("invoice_number") or {}).get("value") or ""
         ).strip()
-        if split_invoice_number != "001":
+        split_po_number = (
+            (split_result.get("po_number") or {}).get("value") or ""
+        ).strip()
+        if split_invoice_number != "001" or split_po_number != "INV":
             raise AssertionError(
-                f"split transform was not applied by runtime: {split_result}"
+                f"multi-target split was not applied by runtime: {split_result}"
             )
 
         print(
