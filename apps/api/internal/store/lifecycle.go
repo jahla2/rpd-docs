@@ -1,6 +1,10 @@
 package store
 
-import "context"
+import (
+    "context"
+
+    "github.com/jackc/pgx/v5"
+)
 
 func (s *Store) FindDuplicateDocuments(ctx context.Context,tenantID,sha256 string,limit int)([]string,error){
     if limit<=0 || limit>50 { limit=20 }
@@ -44,7 +48,7 @@ func (s *Store) CreateReprocessJob(ctx context.Context,p CreateReprocessJobParam
       WHERE tenant_id=$1 AND id=$2
     `,p.TenantID,p.DocumentID)
     if err!=nil { return err }
-    if result.RowsAffected()!=1 { return ErrNotFound }
+    if result.RowsAffected()!=1 { return pgx.ErrNoRows }
 
     if _,err=tx.Exec(ctx,`
       INSERT INTO processing_jobs
