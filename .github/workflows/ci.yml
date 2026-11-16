@@ -186,3 +186,42 @@ jobs:
         env:
           S3_TEST_ENDPOINT: http://127.0.0.1:9000
         run: go test ./apps/api/internal/storage -run TestS3Integration -v
+
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate Compose configuration
+        run: docker compose config
+      - name: Build and start full MVP stack
+        run: docker compose up -d --build
+      - name: Wait for API readiness
+        run: |
+          for i in $(seq 1 90); do
+            if curl -fsS http://127.0.0.1:8080/health/ready >/tmp/rpd-ready.json; then
+              cat /tmp/rpd-ready.json
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose ps
+          docker compose logs --no-color
+          exit 1
+      - name: Install E2E client dependencies
+        run: pip install "requests>=2.32,<3" "reportlab>=4.2,<5"
+      - name: Run invoice-to-ERP E2E smoke
+        env:
+          RPD_BASE_URL: http://127.0.0.1:8080
+          RPD_E2E_TIMEOUT: "300"
+        run: python tests/end-to-end/e2e_smoke.py
+      - name: Dump service logs on failure
+        if: failure()
+        run: docker compose logs --no-color
+      - name: Stop test stack
+        if: always()
+        run: docker compose down -v --remove-orphans
+
