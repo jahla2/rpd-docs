@@ -49,6 +49,7 @@ func New(st *store.Store, fs *storage.Manager, q *queue.Publisher, defaultTenant
     mux.HandleFunc("GET /api/v1/documents/{id}/result", s.getDocumentResult)
     mux.HandleFunc("GET /api/v1/documents/{id}/artifacts", s.getDocumentArtifacts)
     mux.HandleFunc("GET /api/v1/jobs/{id}", s.getJob)
+    mux.HandleFunc("GET /api/v1/jobs/{id}/steps", s.getJobSteps)
     mux.HandleFunc("GET /api/v1/jobs/{id}/pages", s.listJobPages)
     mux.HandleFunc("GET /api/v1/jobs/{id}/events", s.streamJobEvents)
     mux.HandleFunc("POST /api/v1/mapping-templates/preview", s.previewMapping)
@@ -118,8 +119,7 @@ func (s *Server) upload(w http.ResponseWriter,r *http.Request) {
     if !allowedUpload(header,mimeType) {
         writeError(w,http.StatusUnsupportedMediaType,"UNSUPPORTED_FORMAT","unsupported file type"); return
     }
-    tenantID := strings.TrimSpace(r.Header.Get("X-Tenant-ID"))
-    if tenantID == "" { tenantID = s.defaultTenantID }
+    tenantID := tenantFrom(r,s.defaultTenantID)
 
     options:=map[string]any{}
     if templateID:=strings.TrimSpace(r.FormValue("mapping_template_id")); templateID!="" {
@@ -210,6 +210,15 @@ func (s *Server) getJob(w http.ResponseWriter,r *http.Request) {
     if store.IsNotFound(err) { writeError(w,http.StatusNotFound,"NOT_FOUND","job not found"); return }
     if err != nil { writeError(w,http.StatusInternalServerError,"DATABASE_FAILED","failed to read job"); return }
     writeJSON(w,http.StatusOK,j)
+}
+
+func (s *Server) getJobSteps(w http.ResponseWriter,r *http.Request) {
+    tenantID:=tenantFrom(r,s.defaultTenantID)
+    steps,err:=s.store.ListJobSteps(r.Context(),tenantID,r.PathValue("id"))
+    if err!=nil {
+        writeError(w,http.StatusInternalServerError,"DATABASE_FAILED","failed to read job steps"); return
+    }
+    writeJSON(w,http.StatusOK,map[string]any{"items":steps})
 }
 
 func (s *Server) previewMapping(w http.ResponseWriter,r *http.Request) {
