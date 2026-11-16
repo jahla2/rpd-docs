@@ -316,11 +316,30 @@ func (w *Worker) HandlePreprocess(ctx context.Context, job JobMessage) error {
         classificationPayload["hint_source"]="explicit"
     }
 
-    classificationBody,err:=w.postJSON(ctx,"/v1/classify",classificationPayload)
-    if err!=nil { return w.fail(ctx,job,fmt.Errorf("document classification: %w",err)) }
+    classificationCtx,cancelClassification:=context.WithTimeout(ctx,3*time.Second)
+    classificationBody,err:=w.postJSON(classificationCtx,"/v1/classify",classificationPayload)
+    classificationTimedOut:=classificationCtx.Err()==context.DeadlineExceeded
+    cancelClassification()
 
     var classification ClassificationResponse
-    if err:=json.Unmarshal(classificationBody,&classification); err!=nil {
+    if err!=nil {
+        if !classificationTimedOut {
+            return w.fail(ctx,job,fmt.Errorf("document classification: %w",err))
+        }
+        classification=ClassificationResponse{
+            SchemaVersion:"1.0",
+            DocumentID:job.DocumentID,
+            DocumentType:"unknown",
+            Confidence:0,
+            Method:"classification_timeout",
+            ModelVersion:"timeout-3s",
+            Alternatives:[]ClassificationAlternative{},
+            LatencyMS:3000,
+            RequiresReview:true,
+        }
+        classificationBody,_=json.Marshal(classification)
+        w.Logger.Warn("document_classification_timeout","document_id",job.DocumentID,"job_id",job.JobID)
+    } else if err:=json.Unmarshal(classificationBody,&classification); err!=nil {
         return w.fail(ctx,job,fmt.Errorf("decode classification result: %w",err))
     }
     if classification.SchemaVersion!="1.0" || classification.DocumentType=="" {
