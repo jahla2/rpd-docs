@@ -167,3 +167,100 @@ func TestPreviewTemplateSplitFeedsMultipleTargets(t *testing.T){
         t.Fatalf("suggestions=%v",preview.Suggestions)
     }
 }
+
+
+func TestPreviewTemplateAppliesCombine(t *testing.T){
+    raw:=json.RawMessage(`{
+      "columns":[
+        {
+          "source_aliases":["First Name"],
+          "target":"supplier_name",
+          "type":"string",
+          "required":true,
+          "operations":[
+            {
+              "operation":"combine",
+              "config":{"with":["Last Name"],"separator":" ","skip_empty":false}
+            }
+          ]
+        }
+      ]
+    }`)
+    config,err:=ValidateTemplateConfig(raw)
+    if err!=nil { t.Fatal(err) }
+
+    preview:=PreviewTemplate(
+        config,
+        []string{"First Name","Last Name"},
+        map[string][]string{
+            "First Name":{"ABC"},
+            "Last Name":{"Trading"},
+        },
+    )
+    if len(preview.ValidationErrors)!=0 { t.Fatalf("errors=%v",preview.ValidationErrors) }
+    if got:=preview.SampleTransformedRows[0]["supplier_name"]; got!="ABC Trading" {
+        t.Fatalf("supplier_name=%q",got)
+    }
+}
+
+func TestPreviewTemplateCombineMissingSourceFailsClosed(t *testing.T){
+    raw:=json.RawMessage(`{
+      "columns":[
+        {
+          "source_aliases":["First Name"],
+          "target":"supplier_name",
+          "type":"string",
+          "operations":[
+            {
+              "operation":"combine",
+              "config":{"with":["Last Name"],"separator":" ","skip_empty":false}
+            }
+          ]
+        }
+      ]
+    }`)
+    config,err:=ValidateTemplateConfig(raw)
+    if err!=nil { t.Fatal(err) }
+
+    preview:=PreviewTemplate(
+        config,
+        []string{"First Name"},
+        map[string][]string{"First Name":{"ABC"}},
+    )
+    if len(preview.ValidationErrors)==0 {
+        t.Fatalf("expected missing combine source error: %#v",preview)
+    }
+    if got:=preview.SampleTransformedRows[0]["supplier_name"]; got!="" {
+        t.Fatalf("expected fail-closed combine output, got %q",got)
+    }
+}
+
+func TestPreviewTemplateCombineSkipEmptyAllowsOptionalSource(t *testing.T){
+    raw:=json.RawMessage(`{
+      "columns":[
+        {
+          "source_aliases":["First Name"],
+          "target":"supplier_name",
+          "type":"string",
+          "operations":[
+            {
+              "operation":"combine",
+              "config":{"with":["Middle Name"],"separator":" ","skip_empty":true}
+            }
+          ]
+        }
+      ]
+    }`)
+    config,err:=ValidateTemplateConfig(raw)
+    if err!=nil { t.Fatal(err) }
+
+    preview:=PreviewTemplate(
+        config,
+        []string{"First Name"},
+        map[string][]string{"First Name":{"ABC"}},
+    )
+    if len(preview.ValidationErrors)!=0 { t.Fatalf("errors=%v",preview.ValidationErrors) }
+    if got:=preview.SampleTransformedRows[0]["supplier_name"]; got!="ABC" {
+        t.Fatalf("supplier_name=%q",got)
+    }
+}
