@@ -593,9 +593,23 @@ Non-goals for MVP: Kubernetes, dozens of microservices, fully autonomous financi
 - [x] full migration-chain CI
 - [x] real two-page searchable-PDF native smoke test
 - [x] S3-compatible upload/read/presign integration test
+- [x] authenticated tenant identity enforced on document upload
+- [x] DB-backed job-step attempts and run-level idempotency
+- [x] JetStream message deduplication and worker progress heartbeats
+- [x] transactional outbox for document and reconciliation queue publication
+- [x] duplicate document detection by tenant + SHA-256
+- [x] immutable document reprocessing with a new run/version
+- [x] canonical fields, line items and validation records persisted in PostgreSQL
+- [x] per-page OCR run provenance persisted
+- [x] granular PREPROCESS/OCR/TABLE/MAPPING/VALIDATION/FINALIZE job-step API
+- [x] dependency-aware readiness for PostgreSQL/storage/NATS/native/AI
+- [x] full Docker Compose runtime for API/orchestrator/reconciliation/AI/dependencies
+- [x] end-to-end CI: upload → canonical → duplicate/reprocess → ERP → reconciliation → export
+- [x] reconciliation retry/idempotency and S3-aware canonical artifact reads
 - [ ] private representative invoice/ERP benchmark corpus
 - [ ] sustained concurrency/load test in a production-like environment
 - [ ] backup/restore and retention-policy validation
+- [ ] production secret manager / key-rotation automation
 - [ ] external security review / penetration testing before public exposure
 
 ## 17. Development order
@@ -613,6 +627,8 @@ Build vertical slices:
 ## 18. Definition of MVP done
 
 A scanned invoice can be uploaded, stored immutably, preprocessed, OCR'd, table-extracted, mapped to canonical invoice JSON, validated, reconciled against imported ERP data, reviewed when uncertain, and exported with an auditable evidence trail.
+
+The reliable MVP path is now continuously exercised in CI through the full Docker Compose stack. The smoke test also verifies duplicate detection and immutable reprocessing before ERP reconciliation/export. Remaining unchecked work in this guide requires representative private data, production-like infrastructure, operational drills, or external security validation rather than additional core MVP business-flow code.
 
 ## 19. Quality and observability
 
