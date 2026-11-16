@@ -11,6 +11,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from app.extraction.invoice import extract_invoice, extract_invoice_document
+from app.extraction.financial import SUPPORTED_FINANCIAL_TYPES, extract_financial_document
 from app.agents.invoice_resolver import apply_proposal, resolve_invoice
 from app.classification.service import classification_service
 from app.pdftext.poppler import parse_bbox_layout
@@ -64,6 +65,13 @@ class InvoicePageInput(BaseModel):
 
 class InvoiceDocumentExtractRequest(BaseModel):
     document_id: str
+    pages: list[InvoicePageInput]
+    mapping_config: dict[str, Any] | None = None
+
+
+class FinancialDocumentExtractRequest(BaseModel):
+    document_id: str
+    document_type: str
     pages: list[InvoicePageInput]
     mapping_config: dict[str, Any] | None = None
 
@@ -235,6 +243,31 @@ def run_invoice_document_extraction(request: InvoiceDocumentExtractRequest) -> d
         ],
         mapping_config=request.mapping_config,
     )
+
+
+@app.post("/v1/extract/financial-document")
+def run_financial_document_extraction(request: FinancialDocumentExtractRequest) -> dict[str, Any]:
+    document_type = request.document_type.strip().lower()
+    if document_type not in SUPPORTED_FINANCIAL_TYPES:
+        raise HTTPException(status_code=400, detail=f"unsupported financial document type: {document_type}")
+    if not request.pages:
+        raise HTTPException(status_code=400, detail="pages must not be empty")
+    try:
+        return extract_financial_document(
+            document_id=request.document_id,
+            document_type=document_type,
+            pages=[
+                {
+                    "page": page.page,
+                    "ocr_blocks": [block.model_dump() for block in page.ocr_blocks],
+                    "table_html": page.table_html,
+                }
+                for page in request.pages
+            ],
+            mapping_config=request.mapping_config,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 class AgentInvoiceResolveRequest(BaseModel):
