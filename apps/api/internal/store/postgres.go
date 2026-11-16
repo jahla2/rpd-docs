@@ -145,6 +145,7 @@ func (s *Store) ListJobSteps(ctx context.Context,tenantID,jobID string)([]JobSte
         CASE step_name
           WHEN 'PREPROCESS' THEN 10
           WHEN 'OCR' THEN 20
+          WHEN 'CLASSIFY' THEN 25
           WHEN 'TABLE' THEN 30
           WHEN 'MAPPING' THEN 40
           WHEN 'VALIDATION' THEN 50
