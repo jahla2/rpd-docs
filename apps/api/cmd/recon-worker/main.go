@@ -12,6 +12,7 @@ import (
     "github.com/jahla2/rpd-docs/apps/api/internal/config"
     "github.com/jahla2/rpd-docs/apps/api/internal/queue"
     "github.com/jahla2/rpd-docs/apps/api/internal/reconservice"
+    "github.com/jahla2/rpd-docs/apps/api/internal/storage"
     "github.com/jahla2/rpd-docs/apps/api/internal/store"
     "github.com/nats-io/nats.go"
 )
@@ -30,6 +31,14 @@ func main(){
     js,err:=nc.JetStream()
     if err!=nil { logger.Error("jetstream startup failed","error",err); os.Exit(1) }
 
+    storageManager,err:=storage.NewManager(storage.Config{
+        Backend:cfg.StorageBackend,Root:cfg.StorageRoot,Endpoint:cfg.S3Endpoint,Region:cfg.S3Region,
+        Bucket:cfg.S3Bucket,AccessKey:cfg.S3AccessKey,SecretKey:cfg.S3SecretKey,CreateBucket:false,
+    })
+    if err!=nil { logger.Error("storage startup failed","error",err); os.Exit(1) }
+    if err:=storageManager.Ready(); err!=nil { logger.Error("storage readiness failed","error",err); os.Exit(1) }
+    service:=reconservice.NewWithReader(st,storageManager.Read)
+
     // API startup normally creates/updates the stream. The worker retries the
     // subscription briefly so deploy order does not create a race.
     var sub *nats.Subscription
@@ -47,7 +56,6 @@ func main(){
                 return
             }
 
-            service:=reconservice.New(st)
             ctx,cancel:=context.WithCancel(context.Background())
             defer cancel()
 
