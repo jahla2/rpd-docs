@@ -103,6 +103,7 @@ type CanonicalResponse struct {
 type CanonicalEvidence struct {
     Page int `json:"page"`
     BlockIDs []string `json:"block_ids"`
+    BBox []float64 `json:"bbox,omitempty"`
     Method string `json:"method"`
     Confidence float64 `json:"confidence"`
 }
@@ -110,6 +111,7 @@ type CanonicalEvidence struct {
 type CanonicalField struct {
     Raw string `json:"raw"`
     Value string `json:"value"`
+    DataType string `json:"data_type,omitempty"`
     Evidence CanonicalEvidence `json:"evidence"`
 }
 
@@ -125,6 +127,11 @@ type CanonicalInvoiceDocument struct {
     Tax *CanonicalField `json:"tax"`
     GrandTotal *CanonicalField `json:"grand_total"`
     LineItems []map[string]any `json:"line_items"`
+}
+
+type CanonicalGenericDocument struct {
+    Fields map[string]*CanonicalField `json:"fields"`
+    Tables map[string][]map[string]any `json:"tables"`
 }
 
 type pageExtraction struct {
@@ -364,7 +371,7 @@ func (w *Worker) HandlePreprocess(ctx context.Context, job JobMessage) error {
         "requires_review":classification.RequiresReview,
     })
 
-    if classification.DocumentType!="invoice" {
+    if !supportsFinancialExtraction(classification.DocumentType) {
         return w.finalizeUnsupportedDocument(ctx,job,native.PageCount,classification)
     }
 
@@ -429,27 +436,28 @@ func (w *Worker) HandlePreprocess(ctx context.Context, job JobMessage) error {
 
     extractPayload:=map[string]any{
         "document_id":job.DocumentID,
+        "document_type":classification.DocumentType,
         "pages":extractions,
     }
     if mappingConfig,ok:=job.Options["mapping_config"]; ok {
         extractPayload["mapping_config"]=mappingConfig
     }
-    canonicalBody,err:=w.postJSON(ctx,"/v1/extract/invoice-document",extractPayload)
-    if err!=nil { return w.fail(ctx,job,fmt.Errorf("multi-page invoice extraction: %w",err)) }
+    canonicalBody,err:=w.postJSON(ctx,"/v1/extract/financial-document",extractPayload)
+    if err!=nil { return w.fail(ctx,job,fmt.Errorf("%s extraction: %w",classification.DocumentType,err)) }
 
     var canonical CanonicalResponse
     if err:=json.Unmarshal(canonicalBody,&canonical); err!=nil {
         return w.fail(ctx,job,fmt.Errorf("decode canonical result: %w",err))
     }
-    if canonical.DocumentType=="" { canonical.DocumentType="invoice" }
+    if canonical.DocumentType=="" { canonical.DocumentType=classification.DocumentType }
 
     if err:=w.setStatus(ctx,job,"VALIDATING",false,90); err!=nil { return w.fail(ctx,job,err) }
 
-    validationResult,err:=validation.ValidateInvoice(canonicalBody,"0.01")
-    if err!=nil { return w.fail(ctx,job,fmt.Errorf("validate canonical invoice: %w",err)) }
+    validationResult,err:=validation.ValidateDocument(canonicalBody,canonical.DocumentType,"0.01")
+    if err!=nil { return w.fail(ctx,job,fmt.Errorf("validate canonical %s: %w",canonical.DocumentType,err)) }
 
     var agentTrace []byte
-    if w.AgentFallbackEnabled && (canonical.RequiresReview || validationResult.RequiresReview) {
+    if canonical.DocumentType=="invoice" && w.AgentFallbackEnabled && (canonical.RequiresReview || validationResult.RequiresReview) {
         resolved,trace,agentErr:=w.tryAgentFallback(ctx,job,canonicalBody,validationResult,extractions)
         if agentErr!=nil {
             w.Logger.Warn("agent_fallback_skipped","error",agentErr,"document_id",job.DocumentID)
@@ -506,6 +514,9 @@ func (w *Worker) HandlePreprocess(ctx context.Context, job JobMessage) error {
     requiresReview:=canonical.RequiresReview || validationResult.RequiresReview
     finalStatus:="READY_FOR_RECONCILIATION"
     eventType:="document.completed"
+    if canonical.DocumentType!="invoice" {
+        finalStatus="COMPLETED"
+    }
     if requiresReview {
         finalStatus="REVIEW_REQUIRED"
         eventType="review.required"
