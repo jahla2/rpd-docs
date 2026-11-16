@@ -38,11 +38,12 @@ def _bounds(bbox: list[float]) -> tuple[float, float, float, float] | None:
     return None
 
 
-def _targets(text: str) -> set[str]:
+def _targets(text: str, header_aliases: dict[str, tuple[str, ...] | list[str]] | None = None) -> set[str]:
     normalized = _normalize(text)
     matches: set[str] = set()
     padded = f" {normalized} "
-    for target, aliases in HEADER_ALIASES.items():
+    aliases_by_target = header_aliases or HEADER_ALIASES
+    for target, aliases in aliases_by_target.items():
         for alias in aliases:
             alias_normalized = _normalize(alias)
             if normalized == alias_normalized or f" {alias_normalized} " in padded:
@@ -55,6 +56,7 @@ def detect_table_region(
     blocks: list[dict],
     image_width: int,
     image_height: int,
+    header_aliases: dict[str, tuple[str, ...] | list[str]] | None = None,
 ) -> list[int] | None:
     """Detect a probable line-item table region from OCR header geometry.
 
@@ -84,7 +86,7 @@ def detect_table_region(
         }
         normalized_blocks.append(entry)
 
-        targets = _targets(text)
+        targets = _targets(text, header_aliases)
         if targets:
             entry = dict(entry)
             entry["targets"] = targets
