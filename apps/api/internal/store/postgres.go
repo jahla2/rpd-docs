@@ -20,6 +20,9 @@ type CreateDocumentParams struct {
     StorageURI string
     JobID string
     RunID string
+    OutboxSubject string
+    OutboxMessageKey string
+    OutboxPayload []byte
 }
 
 type Document struct {
@@ -98,6 +101,16 @@ func (s *Store) CreateDocumentAndJob(ctx context.Context, p CreateDocumentParams
         VALUES ($1,$2,$3,'ORIGINAL',$4,$5,$6)
     `, p.TenantID,p.DocumentID,p.RunID,p.StorageURI,p.MimeType,p.SHA256)
     if err != nil { return err }
+
+    if len(p.OutboxPayload)>0 {
+        _,err=tx.Exec(ctx,`
+          INSERT INTO outbox_messages
+            (tenant_id,subject,message_key,payload_json,status)
+          VALUES ($1,$2,$3,$4::jsonb,'PENDING')
+          ON CONFLICT (message_key) DO NOTHING
+        `,p.TenantID,p.OutboxSubject,p.OutboxMessageKey,string(p.OutboxPayload))
+        if err!=nil { return err }
+    }
     return tx.Commit(ctx)
 }
 
