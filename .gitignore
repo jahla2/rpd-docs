@@ -11,3 +11,6 @@ coverage.out
 .DS_Store
 .idea/
 .vscode/
+
+# Local ML model binaries
+models/modernbert/
