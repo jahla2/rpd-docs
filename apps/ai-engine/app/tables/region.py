@@ -147,7 +147,7 @@ def detect_table_region(
     if footer_candidates:
         y2 = min(y2, min(footer_candidates) - y_margin)
 
-    if y2 - y1 < max(120.0, image_height * 0.08):
+    if y2 - y1 < max(80.0, image_height * 0.05):
         return None
 
     # If header OCR spans only part of the table, widen modestly using nearby
