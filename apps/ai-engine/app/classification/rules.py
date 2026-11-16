@@ -119,7 +119,7 @@ def _normalize(value: str) -> str:
     return " ".join(value.split())
 
 
-def _document_text(pages: list[dict[str, Any]]) -> str:
+def build_document_text(pages: list[dict[str, Any]]) -> str:
     parts: list[str] = []
     size = 0
     for page in pages[:_MAX_PAGES]:
@@ -178,7 +178,7 @@ def classify_document(
             "requires_review": hint == "unknown",
         }
 
-    text = _document_text(pages)
+    text = build_document_text(pages)
     ranked = _rank(text)
     top_type, top_score = ranked[0]
     second_score = ranked[1][1] if len(ranked) > 1 else 0.0
