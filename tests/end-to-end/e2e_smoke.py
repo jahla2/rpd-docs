@@ -96,6 +96,10 @@ def main() -> None:
         job_id = upload["job_id"]
         wait_for_job(job_id)
 
+        document = api("GET", f"/api/v1/documents/{document_id}").json()
+        if (document.get("document_type") or "").strip() != "invoice":
+            raise AssertionError(f"document was not classified as invoice: {document}")
+
         result = api("GET", f"/api/v1/documents/{document_id}/result").json()
         invoice_number = ((result.get("invoice_number") or {}).get("value") or "").strip()
         grand_total = ((result.get("grand_total") or {}).get("value") or "").strip()
@@ -189,6 +193,13 @@ def main() -> None:
         steps = api("GET", f"/api/v1/jobs/{reprocess['job_id']}/steps").json().get("items") or []
         if not steps or steps[-1].get("status") != "COMPLETED":
             raise AssertionError(f"job steps did not complete: {steps}")
+        classify_steps = [step for step in steps if step.get("step_name") == "CLASSIFY"]
+        if not classify_steps or classify_steps[-1].get("status") != "COMPLETED":
+            raise AssertionError(f"classification step did not complete: {steps}")
+
+        artifacts = api("GET", f"/api/v1/documents/{document_id}/artifacts").json().get("items") or []
+        if not any(item.get("artifact_type") == "CLASSIFICATION_JSON" for item in artifacts):
+            raise AssertionError(f"classification artifact missing: {artifacts}")
 
         print(
             json.dumps(
