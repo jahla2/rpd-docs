@@ -9,7 +9,7 @@ COPY apps/api ./apps/api
 COPY apps/native-engine ./apps/native-engine
 
 WORKDIR /src/apps/api
-RUN go mod download
+RUN go mod tidy
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/rpd-api ./cmd/server
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/rpd-recon-worker ./cmd/recon-worker
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/rpd-keyctl ./cmd/keyctl
