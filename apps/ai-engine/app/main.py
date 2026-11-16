@@ -11,7 +11,13 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from app.extraction.invoice import extract_invoice, extract_invoice_document
-from app.extraction.financial import SUPPORTED_FINANCIAL_TYPES, extract_financial_document
+from app.extraction.financial import (
+    SUPPORTED_FINANCIAL_TYPES,
+    extract_financial_document,
+    field_aliases,
+    table_aliases,
+)
+from app.layout.profile import build_layout_fingerprint, match_layout_profile
 from app.agents.invoice_resolver import apply_proposal, resolve_invoice
 from app.classification.service import classification_service
 from app.pdftext.poppler import parse_bbox_layout
@@ -41,6 +47,8 @@ class TableRequest(BaseModel):
     image_path: str
     ocr_blocks: list[OCRBlockInput] = Field(default_factory=list)
     auto_crop: bool = True
+    document_type: str | None = None
+    layout_config: dict[str, Any] | None = None
 
 
 class InvoiceExtractRequest(BaseModel):
@@ -69,11 +77,38 @@ class InvoiceDocumentExtractRequest(BaseModel):
     mapping_config: dict[str, Any] | None = None
 
 
+class FinancialPageInput(BaseModel):
+    page: int = Field(ge=1)
+    image_path: str | None = None
+    image_width: int | None = Field(default=None, ge=1)
+    image_height: int | None = Field(default=None, ge=1)
+    ocr_blocks: list[OCRBlockInput] = Field(default_factory=list)
+    table_html: str | None = None
+    table_cell_bboxes: list[Any] = Field(default_factory=list)
+    table_logic_points: list[Any] = Field(default_factory=list)
+
+
 class FinancialDocumentExtractRequest(BaseModel):
     document_id: str
     document_type: str
-    pages: list[InvoicePageInput]
+    pages: list[FinancialPageInput]
     mapping_config: dict[str, Any] | None = None
+    layout_match: dict[str, Any] | None = None
+
+
+class LayoutMatchPageInput(BaseModel):
+    page: int = Field(ge=1)
+    image_path: str | None = None
+    image_width: int | None = Field(default=None, ge=1)
+    image_height: int | None = Field(default=None, ge=1)
+    ocr_blocks: list[OCRBlockInput] = Field(default_factory=list)
+
+
+class LayoutMatchRequest(BaseModel):
+    document_id: str
+    document_type: str
+    pages: list[LayoutMatchPageInput]
+    profiles: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ClassificationPageInput(BaseModel):
@@ -136,6 +171,33 @@ def run_classification(request: ClassificationRequest) -> dict[str, Any]:
     )
 
 
+@app.post("/v1/layout/match")
+def run_layout_match(request: LayoutMatchRequest) -> dict[str, Any]:
+    document_type = request.document_type.strip().lower()
+    if document_type not in SUPPORTED_FINANCIAL_TYPES:
+        raise HTTPException(status_code=400, detail=f"unsupported financial document type: {document_type}")
+    if not request.pages:
+        raise HTTPException(status_code=400, detail="pages must not be empty")
+
+    pages = [
+        {
+            "page": page.page,
+            "image_path": page.image_path,
+            "image_width": page.image_width,
+            "image_height": page.image_height,
+            "ocr_blocks": [block.model_dump() for block in page.ocr_blocks],
+        }
+        for page in request.pages
+    ]
+    fingerprint = build_layout_fingerprint(
+        document_type,
+        pages,
+        field_aliases(document_type),
+        table_aliases(document_type),
+    )
+    return match_layout_profile(fingerprint, request.profiles)
+
+
 @app.post("/v1/ocr")
 def run_ocr(request: OCRRequest) -> dict:
     path = Path(request.image_path)
@@ -173,7 +235,16 @@ def run_tables(request: TableRequest) -> dict:
 
             with Image.open(path) as image:
                 width, height = image.size
-                region_bbox = detect_table_region(blocks, width, height)
+                header_aliases = None
+                document_type = (request.document_type or "").strip().lower()
+                if document_type in SUPPORTED_FINANCIAL_TYPES:
+                    header_aliases = table_aliases(document_type, request.layout_config)
+                region_bbox = detect_table_region(
+                    blocks,
+                    width,
+                    height,
+                    header_aliases=header_aliases,
+                )
 
                 if region_bbox is not None:
                     temp_dir = TemporaryDirectory(prefix="rpd-table-")
@@ -259,12 +330,18 @@ def run_financial_document_extraction(request: FinancialDocumentExtractRequest) 
             pages=[
                 {
                     "page": page.page,
+                    "image_path": page.image_path,
+                    "image_width": page.image_width,
+                    "image_height": page.image_height,
                     "ocr_blocks": [block.model_dump() for block in page.ocr_blocks],
                     "table_html": page.table_html,
+                    "table_cell_bboxes": page.table_cell_bboxes,
+                    "table_logic_points": page.table_logic_points,
                 }
                 for page in request.pages
             ],
             mapping_config=request.mapping_config,
+            layout_match=request.layout_match,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
