@@ -172,6 +172,43 @@ def upload_pdf(path: Path, filename: str) -> dict:
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="rpd-e2e-") as tmp:
         tmp_path = Path(tmp)
+
+        # Document-type configuration is tenant-scoped and persisted in PostgreSQL.
+        document_type = api(
+            "POST",
+            "/api/v1/document-types",
+            json={
+                "code": "receipt",
+                "name": "Receipt",
+                "schema_version": 1,
+                "active": True,
+            },
+        ).json()
+        document_type_id = document_type["id"]
+
+        listed_document_types = api("GET", "/api/v1/document-types").json().get("items") or []
+        if document_type_id not in {item.get("id") for item in listed_document_types}:
+            raise AssertionError(f"document type missing from list: {listed_document_types}")
+
+        fetched_document_type = api(
+            "GET",
+            f"/api/v1/document-types/{document_type_id}",
+        ).json()
+        if fetched_document_type.get("code") != "receipt":
+            raise AssertionError(f"unexpected document type: {fetched_document_type}")
+
+        updated_document_type = api(
+            "PUT",
+            f"/api/v1/document-types/{document_type_id}",
+            json={
+                "code": "receipt",
+                "name": "Receipt Document",
+                "schema_version": 1,
+                "active": False,
+            },
+        ).json()
+        if updated_document_type.get("name") != "Receipt Document" or updated_document_type.get("active") is not False:
+            raise AssertionError(f"document type update failed: {updated_document_type}")
         invoice_path = tmp_path / "invoice.pdf"
         build_invoice(invoice_path)
 
