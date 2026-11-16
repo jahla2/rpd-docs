@@ -88,6 +88,21 @@ func (s *Store) CreateQueuedReconciliationRun(
         return ReconciliationRun{},err
     }
 
+    queuePayload,err:=json.Marshal(map[string]any{
+        "schema_version":"1.0",
+        "tenant_id":tenantID,
+        "run_id":r.ID,
+    })
+    if err!=nil { return ReconciliationRun{},err }
+    if _,err=tx.Exec(ctx,`
+      INSERT INTO outbox_messages
+        (tenant_id,subject,message_key,payload_json,status)
+      VALUES ($1,'reconciliation.run',$2,$3::jsonb,'PENDING')
+      ON CONFLICT (message_key) DO NOTHING
+    `,tenantID,"reconciliation:"+r.ID,string(queuePayload)); err!=nil {
+        return ReconciliationRun{},err
+    }
+
     if err=tx.Commit(ctx); err!=nil { return ReconciliationRun{},err }
     return r,nil
 }
