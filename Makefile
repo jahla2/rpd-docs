@@ -1,4 +1,4 @@
-.PHONY: up down logs infra-up infra-down test go-test py-test cpp-build e2e
+.PHONY: up down logs infra-up infra-down test go-test py-test cpp-build e2e model-modernbert
 
 up:
 	docker compose up -d --build
@@ -29,3 +29,6 @@ e2e:
 	python tests/end-to-end/e2e_smoke.py
 
 test: go-test py-test
+
+model-modernbert:
+	python scripts/models/download_modernbert.py
