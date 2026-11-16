@@ -13,6 +13,7 @@ def test_fastapi_application_imports_and_registers_core_routes() -> None:
         "/v1/tables",
         "/v1/extract/invoice",
         "/v1/extract/invoice-document",
+        "/v1/extract/financial-document",
         "/v1/agent/resolve-invoice",
     }
 
