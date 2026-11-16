@@ -209,6 +209,22 @@ def main() -> None:
         ).json()
         if updated_document_type.get("name") != "Receipt Document" or updated_document_type.get("active") is not False:
             raise AssertionError(f"document type update failed: {updated_document_type}")
+
+        immutable_identity_response = requests.put(
+            BASE_URL + f"/api/v1/document-types/{document_type_id}",
+            timeout=30,
+            json={
+                "code": "invoice",
+                "name": "Receipt Document",
+                "schema_version": 1,
+                "active": False,
+            },
+        )
+        if immutable_identity_response.status_code != 409:
+            raise AssertionError(
+                "document type identity mutation was not rejected: "
+                f"{immutable_identity_response.status_code} {immutable_identity_response.text}"
+            )
         invoice_path = tmp_path / "invoice.pdf"
         build_invoice(invoice_path)
 
