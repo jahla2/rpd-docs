@@ -8,6 +8,7 @@ import (
     "log/slog"
     "mime/multipart"
     "net/http"
+    "os"
     "path/filepath"
     "strings"
     "time"
@@ -29,6 +30,8 @@ type Server struct {
     logger *slog.Logger
     invoiceMappings *mapping.Registry
     apiKeyPepper string
+    aiEngineURL string
+    nativeEnginePath string
 }
 
 type MappingPreviewRequest struct {
@@ -40,10 +43,11 @@ type ReprocessRequest struct {
     MappingTemplateID string `json:"mapping_template_id,omitempty"`
 }
 
-func New(st *store.Store, fs *storage.Manager, q *queue.Publisher, defaultTenantID,apiKeyPepper string, logger *slog.Logger) http.Handler {
+func New(st *store.Store, fs *storage.Manager, q *queue.Publisher, defaultTenantID,apiKeyPepper,aiEngineURL,nativeEnginePath string, logger *slog.Logger) http.Handler {
     s := &Server{
         store:st,storage:fs,queue:q,defaultTenantID:defaultTenantID,logger:logger,
         invoiceMappings:mapping.DefaultInvoiceRegistry(),apiKeyPepper:apiKeyPepper,
+        aiEngineURL:strings.TrimRight(aiEngineURL,"/"),nativeEnginePath:nativeEnginePath,
     }
     mux := http.NewServeMux()
     mux.HandleFunc("GET /health/live", s.live)
@@ -102,14 +106,33 @@ func (s *Server) live(w http.ResponseWriter,_ *http.Request) {
 }
 
 func (s *Server) ready(w http.ResponseWriter,r *http.Request) {
+    nativeReady:=false
+    if info,err:=os.Stat(s.nativeEnginePath); err==nil && !info.IsDir() {
+        nativeReady=true
+    }
+    aiReady:=httpDependencyReady(r,s.aiEngineURL+"/health/ready")
     checks := map[string]bool{
         "postgres": s.store.Ping(r.Context()) == nil,
         "storage": s.storage.Ready() == nil,
         "nats": s.queue.Ready(),
+        "native_engine": nativeReady,
+        "ai_engine": aiReady,
     }
-    ok := checks["postgres"] && checks["storage"] && checks["nats"]
+    ok := true
+    for _,healthy:=range checks { ok = ok && healthy }
     status := http.StatusOK; if !ok { status = http.StatusServiceUnavailable }
     writeJSON(w,status,map[string]any{"ready":ok,"checks":checks})
+}
+
+func httpDependencyReady(r *http.Request,url string) bool {
+    if strings.TrimSpace(url)=="" { return false }
+    req,err:=http.NewRequestWithContext(r.Context(),http.MethodGet,url,nil)
+    if err!=nil { return false }
+    client:=&http.Client{Timeout:3*time.Second}
+    resp,err:=client.Do(req)
+    if err!=nil { return false }
+    defer resp.Body.Close()
+    return resp.StatusCode>=200 && resp.StatusCode<300
 }
 
 func (s *Server) upload(w http.ResponseWriter,r *http.Request) {
