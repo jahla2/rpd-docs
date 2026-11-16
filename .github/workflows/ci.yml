@@ -116,6 +116,9 @@ jobs:
           SELECT to_regclass('public.mapping_templates') IS NOT NULL AS mapping_templates_exists \gset
           SELECT to_regclass('public.erp_records') IS NOT NULL AS erp_records_exists \gset
           SELECT to_regclass('public.exports') IS NOT NULL AS exports_exists \gset
+          SELECT to_regclass('public.job_attempts') IS NOT NULL AS job_attempts_exists \gset
+          SELECT to_regclass('public.outbox_messages') IS NOT NULL AS outbox_messages_exists \gset
+          SELECT to_regclass('public.ocr_runs') IS NOT NULL AS ocr_runs_exists \gset
           \if :processing_pages_exists
           \else
             \quit 1
@@ -133,6 +136,18 @@ jobs:
             \quit 1
           \endif
           \if :exports_exists
+          \else
+            \quit 1
+          \endif
+          \if :job_attempts_exists
+          \else
+            \quit 1
+          \endif
+          \if :outbox_messages_exists
+          \else
+            \quit 1
+          \endif
+          \if :ocr_runs_exists
           \else
             \quit 1
           \endif
