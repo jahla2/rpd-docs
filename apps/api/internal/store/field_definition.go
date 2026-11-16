@@ -37,7 +37,7 @@ func (s *Store) ListFieldDefinitions(
       FROM field_definitions fd
       JOIN document_types dt ON dt.id=fd.document_type_id
       WHERE fd.tenant_id=$1
-        AND ($2='' OR fd.document_type_id=$2::uuid)
+        AND (NULLIF($2,'') IS NULL OR fd.document_type_id=NULLIF($2,'')::uuid)
       ORDER BY dt.code,fd.field_name
     `, tenantID, documentTypeID)
     if err != nil {
