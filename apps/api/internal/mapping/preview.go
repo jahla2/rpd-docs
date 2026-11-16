@@ -8,10 +8,11 @@ import (
 )
 
 type TemplatePreviewSuggestion struct {
-    Source     string  `json:"source"`
-    Target     string  `json:"target,omitempty"`
-    Confidence float64 `json:"confidence"`
-    Method     string  `json:"method"`
+    Source     string   `json:"source"`
+    Target     string   `json:"target,omitempty"`
+    Targets    []string `json:"targets,omitempty"`
+    Confidence float64  `json:"confidence"`
+    Method     string   `json:"method"`
 }
 
 type TemplatePreview struct {
@@ -41,28 +42,28 @@ func PreviewTemplate(config TemplateConfig, headers []string, samples map[string
         }
 
         for ruleIndex, rule := range config.Columns {
-            matched := false
             for _, alias := range rule.SourceAliases {
-                if NormalizeHeader(alias) == normalized && normalized != "" {
-                    suggestion.Target = rule.Target
-                    suggestion.Confidence = 1.0
-                    suggestion.Method = "template_alias_exact"
-                    if existingHeaderIndex, exists := matchedRules[ruleIndex]; exists {
-                        preview.ValidationErrors = append(
-                            preview.ValidationErrors,
-                            fmt.Sprintf(
-                                "target %q matches multiple source columns: %q and %q",
-                                rule.Target, headers[existingHeaderIndex], header,
-                            ),
-                        )
-                    } else {
-                        matchedRules[ruleIndex] = headerIndex
-                    }
-                    matched = true
-                    break
+                if NormalizeHeader(alias) != normalized || normalized == "" {
+                    continue
                 }
-            }
-            if matched {
+                if suggestion.Target=="" {
+                    suggestion.Target=rule.Target
+                }
+                suggestion.Targets=append(suggestion.Targets,rule.Target)
+                suggestion.Confidence=1.0
+                suggestion.Method="template_alias_exact"
+
+                if existingHeaderIndex, exists := matchedRules[ruleIndex]; exists {
+                    preview.ValidationErrors = append(
+                        preview.ValidationErrors,
+                        fmt.Sprintf(
+                            "target %q matches multiple source columns: %q and %q",
+                            rule.Target, headers[existingHeaderIndex], header,
+                        ),
+                    )
+                } else {
+                    matchedRules[ruleIndex] = headerIndex
+                }
                 break
             }
         }
