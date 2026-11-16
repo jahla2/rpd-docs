@@ -167,6 +167,19 @@ Use RapidTable/SLANet for detected table regions. Reuse existing OCR boxes/text 
 
 Combine OCR blocks, table cells, reading order, headers, footers and sections. Persist `layout.json`, `reading_order.json` and `document.md`.
 
+### Adaptive layout memory
+
+For supported financial types, build a deterministic layout fingerprint after OCR/classification from:
+
+- portrait/landscape orientation and page aspect ratio
+- normalized field-anchor positions
+- detected table-header concepts
+- document type
+
+Compare the fingerprint only against tenant-scoped `ACTIVE` profiles from PostgreSQL. An unseen successfully validated fingerprint is stored as `CANDIDATE`; a second successful observation promotes it to `ACTIVE`. Active profiles may contribute field aliases, table aliases and normalized field regions. This keeps supplier layout adaptation configuration-driven and prevents one bad OCR result from immediately changing future extraction.
+
+Field evidence stores both source coordinates and normalized 0..1 coordinates. Table processing preserves RapidTable cell bounding boxes and logic points in addition to HTML. Obsidian is intentionally not a runtime dependency; a future import/export adapter may expose profile knowledge as Markdown/YAML for human editing while PostgreSQL remains authoritative.
+
 ## 7. Canonical financial schemas
 
 The invoice schema remains backward-compatible. The runtime also supports schema-driven `supplier_statement` and `bank_statement` extraction. Statement results use a generic envelope with `fields`, `tables`, validation metadata and OCR evidence (page, block IDs and bounding boxes).
@@ -545,6 +558,18 @@ Non-goals for MVP: Kubernetes, dozens of microservices, fully autonomous financi
 - [x] generic field persistence with OCR bbox provenance
 - [x] generic statement transaction-row persistence
 - [x] document-type validation dispatch
+- [x] normalized 0..1 bbox provenance
+- [x] schema-aware table-region aliases
+- [x] right/below/multi-line geometry extraction
+- [x] RapidTable cell-bbox/logic-point preservation
+- [x] deterministic adaptive layout fingerprints
+- [x] PostgreSQL candidate/active layout profile registry
+- [x] two-observation activation guard for learned layouts
+- [x] portrait/landscape layout fingerprinting
+- [x] adaptive supplier-layout E2E with changed-label recovery
+- [ ] full 90°/180° sideways-scan orientation correction
+- [ ] full merged-cell table graph reconstruction
+- [ ] optional Obsidian profile import/export adapter
 - [x] line-item extraction
 - [x] required-field validation
 - [x] quantity × unit-price validation
@@ -642,8 +667,9 @@ Build vertical slices:
 1. Upload → storage → queue → job status.
 2. Preprocess → OCR/text JSON.
 3. OCR/text → fast classification → type routing.
-4. Supported financial route → table → schema-driven canonical extraction.
-5. Document-type validation.
+4. Build/match adaptive layout fingerprint.
+5. Supported financial route → schema-aware table → schema-driven canonical extraction.
+6. Document-type validation.
 6. ERP import → exact reconciliation.
 7. Tolerance → review → export.
 8. Agentic fallback.
