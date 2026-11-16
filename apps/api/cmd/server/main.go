@@ -44,7 +44,7 @@ func main() {
     dispatcher:=&outbox.Dispatcher{Store:st,Queue:q,Logger:logger}
     go dispatcher.Run(outboxCtx)
 
-    handler:=httpapi.New(st,storageManager,q,cfg.DefaultTenantID,cfg.APIKeyPepper,logger)
+    handler:=httpapi.New(st,storageManager,q,cfg.DefaultTenantID,cfg.APIKeyPepper,cfg.AIEngineURL,cfg.NativeEnginePath,logger)
     handler=auth.Middleware{Store:st,Mode:cfg.AuthMode,Pepper:cfg.APIKeyPepper,Logger:logger,Limiter:auth.NewRateLimiter(cfg.RateLimitRPS,cfg.RateLimitBurst)}.Wrap(handler)
     srv:=&http.Server{
         Addr:cfg.HTTPAddr,
