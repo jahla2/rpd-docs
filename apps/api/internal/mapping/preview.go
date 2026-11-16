@@ -98,6 +98,12 @@ func PreviewTemplate(config TemplateConfig, headers []string, samples map[string
             if operation.Operation!="combine" { continue }
             aliases,ok:=combineAliases(operation.Config["with"])
             if !ok { continue }
+            skipEmpty:=false
+            if rawSkip,exists:=operation.Config["skip_empty"]; exists {
+                parsed,ok:=rawSkip.(bool)
+                if ok { skipEmpty=parsed }
+            }
+            if skipEmpty { continue }
             for _,alias:=range aliases {
                 if !normalizedHeaders[NormalizeHeader(alias)] {
                     preview.ValidationErrors=append(
