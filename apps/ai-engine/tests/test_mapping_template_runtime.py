@@ -100,3 +100,50 @@ def test_split_operation_missing_part_fails_closed():
     }
     items, _ = extract_line_items(html, config)
     assert "item_code" not in items[0]
+
+
+
+def test_split_can_feed_multiple_targets_from_one_source_column():
+    html = """
+    <table>
+      <tr><th>Composite Ref</th><th>Line Total</th></tr>
+      <tr><td>SUP001-INV100</td><td>100.00</td></tr>
+    </table>
+    """
+    config = {
+        "columns": [
+            {
+                "source_aliases": ["Composite Ref"],
+                "target": "supplier_code",
+                "type": "identifier",
+                "operations": [
+                    {
+                        "operation": "split",
+                        "config": {"delimiter": "-", "index": 0, "trim": True},
+                    }
+                ],
+            },
+            {
+                "source_aliases": ["Composite Ref"],
+                "target": "invoice_number",
+                "type": "identifier",
+                "operations": [
+                    {
+                        "operation": "split",
+                        "config": {"delimiter": "-", "index": 1, "trim": True},
+                    }
+                ],
+            },
+            {
+                "source_aliases": ["Line Total"],
+                "target": "line_total",
+                "type": "decimal",
+                "operations": [{"operation": "decimal"}],
+            },
+        ]
+    }
+    items, meta = extract_line_items(html, config)
+    assert meta["mapped_headers"]["0"] == ["supplier_code", "invoice_number"]
+    assert items[0]["supplier_code"] == "SUP001"
+    assert items[0]["invoice_number"] == "INV100"
+    assert items[0]["line_total"] == "100.00"
