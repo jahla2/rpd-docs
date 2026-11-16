@@ -296,8 +296,9 @@ Upload
 -> C++ preprocess
 -> embedded PDF text or RapidOCR
 -> CLASSIFY
+-> adaptive layout fingerprint/profile match
 -> invoice / supplier_statement / bank_statement route
--> RapidTable
+-> schema-aware RapidTable region
 -> schema-driven extraction
 -> validation
 -> canonical data
@@ -447,9 +448,40 @@ supplier statement PDF
 -> schema-driven statement extraction
 -> validate supplier/date/closing balance
 -> finish COMPLETED
+
+adaptive landscape supplier layout
+-> process validated layout twice
+-> candidate layout profile becomes ACTIVE
+-> process same layout with a changed closing-balance label
+-> match active fingerprint/profile
+-> recover closing balance from learned normalized region
+-> finish COMPLETED
 ```
 
-## 16. ERP reconciliation API
+## 16. Adaptive layout memory
+
+No extra service is required. Migration `0018_layout_profiles.sql` creates the PostgreSQL runtime memory automatically during normal Compose startup.
+
+The adaptive flow is:
+
+```text
+OCR/text blocks
+-> document classification
+-> layout fingerprint
+-> compare with ACTIVE profiles for that tenant/document type
+-> schema-aware table crop
+-> geometry/schema extraction
+-> deterministic validation
+-> observe successful layout
+```
+
+A new fingerprint is stored as `CANDIDATE`. It is promoted to `ACTIVE` after a second successfully validated observation. This prevents a single bad OCR result from immediately teaching the runtime.
+
+Normalized bounding boxes are stored in field evidence, so layout memory is resilient to different page resolutions and portrait/landscape page sizes. The current native preprocessor still handles small-angle deskew only; full 90°/180° sideways-scan orientation correction remains a future enhancement.
+
+Obsidian is not required to run the system and is intentionally not queried during document processing. A future Obsidian Markdown/YAML adapter can be added for human editing/documentation while PostgreSQL remains the authoritative runtime store.
+
+## 17. ERP reconciliation API
 
 The detailed ERP API workflow is documented in:
 
@@ -470,7 +502,7 @@ POST /api/v1/reconciliation-runs/{id}/export
 GET  /api/v1/exports/{id}/download
 ```
 
-## 17. Important API groups currently available
+## 18. Important API groups currently available
 
 The Go API currently exposes endpoints for:
 
@@ -497,7 +529,7 @@ http://localhost:8000/docs
 
 The Go API currently uses Markdown/source documentation rather than a generated Swagger UI.
 
-## 18. View logs
+## 19. View logs
 
 All services:
 
@@ -516,7 +548,7 @@ docker compose logs -f --tail=200 postgres
 docker compose logs -f --tail=200 nats
 ```
 
-## 19. Stop the stack
+## 20. Stop the stack
 
 Preserve volumes:
 
@@ -530,7 +562,7 @@ Equivalent:
 make down
 ```
 
-## 20. Full local reset
+## 21. Full local reset
 
 Warning: this deletes the local PostgreSQL, NATS and artifact volumes.
 
@@ -544,7 +576,7 @@ Then rebuild:
 docker compose up -d --build
 ```
 
-## 21. Run component tests
+## 22. Run component tests
 
 Go + Python:
 
@@ -572,7 +604,7 @@ make cpp-build
 
 The GitHub Actions pipeline additionally runs database migration validation, S3-compatible storage tests, quality/accuracy gates, C++ smoke tests and the full Docker E2E workflow.
 
-## 22. Classification benchmarks
+## 23. Classification benchmarks
 
 Rules or ModernBERT accuracy:
 
@@ -594,7 +626,7 @@ python benchmarks/classification_latency.py --backend modernbert --provider cuda
 
 Do not claim production latency from CI. Benchmark the real deployment hardware and representative documents.
 
-## 23. Common troubleshooting
+## 24. Common troubleshooting
 
 ### API returns 503 from /health/ready
 
@@ -672,7 +704,7 @@ docker compose logs orchestrator
 
 The API and orchestrator connect to infrastructure during startup. Compose restart policies allow them to recover from short startup-order races.
 
-## 24. Local security notes
+## 25. Local security notes
 
 The default Compose configuration is intentionally development-oriented:
 
@@ -697,7 +729,7 @@ Before production:
 - validate backup/restore
 - establish retention policies
 
-## 25. What is already proven by CI
+## 26. What is already proven by CI
 
 The current GitHub Actions workflow performs:
 
@@ -715,14 +747,14 @@ The current GitHub Actions workflow performs:
 
 A green E2E run is evidence that the services, internal DNS names, mounted native engine, shared storage, ports and business pipeline work together in a fresh Linux Docker environment.
 
-## 26. Related documentation
+## 27. Related documentation
 
 - Architecture and implementation status: `docs/architecture/document-intelligence-core-guide.md`
 - ERP/reconciliation API: `docs/api/erp-reconciliation-mvp.md`
 - Local ModernBERT model notes: `models/README.md`
 - Project quick start: `README.md`
 
-## 27. Recommended local verification checklist
+## 28. Recommended local verification checklist
 
 After every significant infrastructure change:
 
