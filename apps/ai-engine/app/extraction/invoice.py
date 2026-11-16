@@ -40,12 +40,18 @@ def _aliases(mapping_config: dict | None) -> dict[str, set[str]]:
     return merged
 
 
-def map_header(value: str, mapping_config: dict | None = None) -> str | None:
+def map_headers(value: str, mapping_config: dict | None = None) -> list[str]:
     normalized = normalize_header(value)
+    targets: list[str] = []
     for target, aliases in _aliases(mapping_config).items():
         if normalized == target.replace("_", " ") or normalized in aliases:
-            return target
-    return None
+            targets.append(target)
+    return targets
+
+
+def map_header(value: str, mapping_config: dict | None = None) -> str | None:
+    targets = map_headers(value, mapping_config)
+    return targets[0] if targets else None
 
 
 def normalize_decimal(value: str) -> str | None:
@@ -181,11 +187,22 @@ def extract_line_items(table_html: str | None, mapping_config: dict | None = Non
         return [], {"header_row": None, "mapped_headers": {}}
 
     header_index: int | None = None
-    header_map: dict[int, str] = {}
+    header_map: dict[int, list[str]] = {}
 
     for index, row in enumerate(rows[:6]):
-        mapped = {i: target for i, cell in enumerate(row) if (target := map_header(cell, mapping_config))}
-        if len(mapped) >= 2 and ("description" in mapped.values() or "line_total" in mapped.values()):
+        mapped = {
+            i: targets
+            for i, cell in enumerate(row)
+            if (targets := map_headers(cell, mapping_config))
+        }
+        flattened_targets = {
+            target
+            for targets in mapped.values()
+            for target in targets
+        }
+        if len(mapped) >= 2 and (
+            "description" in flattened_targets or "line_total" in flattened_targets
+        ):
             header_index = index
             header_map = mapped
             break
@@ -196,41 +213,46 @@ def extract_line_items(table_html: str | None, mapping_config: dict | None = Non
     items: list[dict] = []
     for row in rows[header_index + 1 :]:
         item: dict[str, str] = {}
-        for column_index, target in header_map.items():
+        for column_index, targets in header_map.items():
             if column_index >= len(row):
                 continue
             value = row[column_index].strip()
             if not value:
                 continue
-            column_rule = None
-            if mapping_config:
-                for candidate in mapping_config.get("columns") or []:
-                    if candidate.get("target") == target:
-                        column_rule = candidate
-                        break
 
-            operations = list((column_rule or {}).get("operations") or [])
-            transformed, excluded = _apply_operations(value, operations)
-            if excluded:
-                continue
-            strict_split = any(
-                str(operation.get("operation", "")).strip().lower() == "split"
-                for operation in operations
-            )
-            if strict_split and transformed is None:
-                continue
+            for target in targets:
+                column_rule = None
+                if mapping_config:
+                    for candidate in mapping_config.get("columns") or []:
+                        if candidate.get("target") == target:
+                            column_rule = candidate
+                            break
 
-            if target in {"quantity", "unit_price", "tax", "line_total"} and not operations:
-                normalized = normalize_decimal(value)
-                transformed = normalized if normalized is not None else value
-            item[target] = transformed if transformed is not None else value
+                operations = list((column_rule or {}).get("operations") or [])
+                transformed, excluded = _apply_operations(value, operations)
+                if excluded:
+                    continue
+                strict_split = any(
+                    str(operation.get("operation", "")).strip().lower() == "split"
+                    for operation in operations
+                )
+                if strict_split and transformed is None:
+                    continue
+
+                if target in {"quantity", "unit_price", "tax", "line_total"} and not operations:
+                    normalized = normalize_decimal(value)
+                    transformed = normalized if normalized is not None else value
+                item[target] = transformed if transformed is not None else value
 
         if item and any(item.get(key) for key in ("description", "item_code", "line_total")):
             items.append(item)
 
     return items, {
         "header_row": header_index,
-        "mapped_headers": {str(i): target for i, target in header_map.items()},
+        "mapped_headers": {
+            str(i): targets[0] if len(targets) == 1 else targets
+            for i, targets in header_map.items()
+        },
     }
 
 
