@@ -85,3 +85,42 @@ func TestPreviewTemplateReportsMissingRequiredMappings(t *testing.T) {
         t.Fatalf("confidence=%v", preview.Confidence)
     }
 }
+
+
+func TestPreviewTemplateAppliesSplit(t *testing.T){
+    raw:=json.RawMessage(`{
+      "columns":[
+        {
+          "source_aliases":["Invoice No"],
+          "target":"invoice_number",
+          "type":"identifier",
+          "required":true,
+          "operations":[
+            {"operation":"split","config":{"delimiter":"-","index":1,"trim":true}}
+          ]
+        }
+      ]
+    }`)
+    config,err:=ValidateTemplateConfig(raw)
+    if err!=nil { t.Fatal(err) }
+
+    preview:=PreviewTemplate(
+        config,
+        []string{"Invoice No"},
+        map[string][]string{"Invoice No":{"INV- 001 "}},
+    )
+    if len(preview.ValidationErrors)!=0 { t.Fatalf("errors=%v",preview.ValidationErrors) }
+    if len(preview.SampleTransformedRows)!=1 { t.Fatalf("rows=%v",preview.SampleTransformedRows) }
+    if got:=preview.SampleTransformedRows[0]["invoice_number"]; got!="001" {
+        t.Fatalf("invoice_number=%q",got)
+    }
+}
+
+func TestApplyOperationsSplitMissingPartFailsClosed(t *testing.T){
+    value,excluded:=ApplyOperations("INV-001",[]Transform{{
+        Operation:"split",
+        Config:map[string]any{"delimiter":"-","index":2,"trim":true},
+    }})
+    if excluded { t.Fatal("split should not mark excluded") }
+    if value!=nil { t.Fatalf("value=%q",*value) }
+}
