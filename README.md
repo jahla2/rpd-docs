@@ -9,7 +9,9 @@ Upload PDF/Image
 → store immutable original
 → C++ preprocessing
 → searchable-PDF text or RapidOCR
-→ RapidTable/SLANet table recognition
+→ fast document classification from existing OCR/text JSON
+→ type routing (unsupported extractors go to review, never invoice-by-default)
+→ RapidTable/SLANet only for routes that need table structure
 → header detection + configurable column mapping
 → canonical JSON + searchable PostgreSQL records
 → ERP CSV/XLSX import
@@ -24,7 +26,7 @@ Upload PDF/Image
 - **Go orchestrator** — retry-safe document processing and deterministic validation.
 - **Go reconciliation worker** — queued invoice-to-ERP reconciliation.
 - **C++** — PDF/image preprocessing with Poppler + OpenCV.
-- **Python** — RapidOCR, RapidTable/SLANet, extraction and guarded agentic fallback.
+- **Python** — RapidOCR, fast deterministic document classification, RapidTable/SLANet, extraction and guarded agentic fallback.
 - **PostgreSQL** — authoritative jobs, steps, canonical searchable fields, reconciliation and audit.
 - **NATS JetStream** — durable processing messages with deduplication.
 - **Filesystem/S3-compatible storage** — immutable originals and generated artifacts.
@@ -96,7 +98,7 @@ The E2E smoke validates upload → canonical extraction → duplicate detection 
 - JetStream message IDs for publisher-side deduplication
 - worker progress heartbeats during long processing
 - transactional outbox for document and reconciliation queue publication
-- canonical fields, line items, validation results and OCR provenance persisted in PostgreSQL
+- canonical fields, line items, validation results, OCR provenance and document-classification provenance persisted in PostgreSQL
 - local and S3-compatible artifact reads
 - resumable SSE status streams
 - deterministic validation before reconciliation
