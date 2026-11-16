@@ -31,6 +31,12 @@ Upload PDF/Image
 - **NATS JetStream** — durable processing messages with deduplication.
 - **Filesystem/S3-compatible storage** — immutable originals and generated artifacts.
 
+## Complete setup guide
+
+For prerequisites, service wiring, ports, startup, health checks, API smoke tests, ModernBERT setup, logs, reset procedures and troubleshooting, see:
+
+`docs/setup/local-development.md`
+
 ## Run the full local MVP
 
 ```bash
