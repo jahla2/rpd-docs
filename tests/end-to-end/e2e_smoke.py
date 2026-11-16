@@ -270,6 +270,69 @@ def main() -> None:
                 "document type identity mutation was not rejected: "
                 f"{immutable_identity_response.status_code} {immutable_identity_response.text}"
             )
+
+        mapping_template = api(
+            "POST",
+            "/api/v1/mapping-templates",
+            json={
+                "name": "e2e-invoice-preview",
+                "document_type": "invoice",
+                "config": {
+                    "columns": [
+                        {
+                            "source_aliases": ["Inv Ref"],
+                            "target": "invoice_number",
+                            "type": "identifier",
+                            "required": True,
+                            "operations": [
+                                {"operation": "normalize", "config": {"case": "upper"}}
+                            ],
+                        },
+                        {
+                            "source_aliases": ["Invoice Date"],
+                            "target": "invoice_date",
+                            "type": "date",
+                            "required": True,
+                            "operations": [{"operation": "date"}],
+                        },
+                        {
+                            "source_aliases": ["Total"],
+                            "target": "line_total",
+                            "type": "decimal",
+                            "operations": [{"operation": "decimal"}],
+                        },
+                    ]
+                },
+            },
+        ).json()
+        mapping_template_id = mapping_template["id"]
+
+        mapping_preview = api(
+            "POST",
+            f"/api/v1/mapping-templates/{mapping_template_id}/preview",
+            json={
+                "headers": ["Inv Ref", "Invoice Date", "Total"],
+                "samples": {
+                    "Inv Ref": [" inv-001 "],
+                    "Invoice Date": ["16/11/2026"],
+                    "Total": ["₱ 1,250.50"],
+                },
+            },
+        ).json()
+        if mapping_preview.get("template_status") != "DRAFT":
+            raise AssertionError(f"draft mapping template could not be previewed: {mapping_preview}")
+        if mapping_preview.get("validation_errors"):
+            raise AssertionError(f"mapping preview validation failed: {mapping_preview}")
+        if mapping_preview.get("confidence") != 1:
+            raise AssertionError(f"mapping preview confidence was not exact: {mapping_preview}")
+        preview_rows = mapping_preview.get("sample_transformed_rows") or []
+        if not preview_rows or preview_rows[0].get("invoice_number") != "INV-001":
+            raise AssertionError(f"mapping preview normalize transform failed: {mapping_preview}")
+        if preview_rows[0].get("invoice_date") != "2026-11-16":
+            raise AssertionError(f"mapping preview date transform failed: {mapping_preview}")
+        if preview_rows[0].get("line_total") != "1250.50":
+            raise AssertionError(f"mapping preview decimal transform failed: {mapping_preview}")
+
         invoice_path = tmp_path / "invoice.pdf"
         build_invoice(invoice_path)
 
