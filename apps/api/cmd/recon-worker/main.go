@@ -51,14 +51,38 @@ func main(){
             ctx,cancel:=context.WithCancel(context.Background())
             defer cancel()
 
+            heartbeatDone:=make(chan struct{})
+            go func(){
+                ticker:=time.NewTicker(15*time.Second)
+                defer ticker.Stop()
+                for {
+                    select {
+                    case <-heartbeatDone:
+                        return
+                    case <-ticker.C:
+                        _=m.InProgress()
+                    }
+                }
+            }()
+            defer close(heartbeatDone)
+
             if executeErr:=service.ExecuteQueuedRun(ctx,message.TenantID,message.RunID); executeErr!=nil {
-                logger.Error("reconciliation run failed","error",executeErr,"run_id",message.RunID)
-                _=st.FailReconciliationRun(context.Background(),message.TenantID,message.RunID,executeErr)
-                _=m.Nak()
+                deliveries:=uint64(1)
+                if metadata,metadataErr:=m.Metadata(); metadataErr==nil {
+                    deliveries=metadata.NumDelivered
+                }
+                logger.Error("reconciliation run failed","error",executeErr,"run_id",message.RunID,"delivery",deliveries)
+                if deliveries<3 {
+                    _=st.RetryReconciliationRun(context.Background(),message.TenantID,message.RunID,executeErr)
+                    _=m.Nak()
+                } else {
+                    _=st.FailReconciliationRun(context.Background(),message.TenantID,message.RunID,executeErr)
+                    _=m.Term()
+                }
                 return
             }
             _=m.Ack()
-        },nats.Durable("rpd-reconciliation-run"),nats.ManualAck(),nats.AckExplicit(),nats.MaxDeliver(3))
+        },nats.Durable("rpd-reconciliation-run"),nats.ManualAck(),nats.AckExplicit(),nats.AckWait(60*time.Second),nats.MaxDeliver(3))
         if err==nil { break }
         time.Sleep(500*time.Millisecond)
     }
