@@ -9,7 +9,7 @@ COPY apps/orchestrator ./apps/orchestrator
 COPY apps/native-engine ./apps/native-engine
 
 WORKDIR /src/apps/orchestrator
-RUN go mod download
+RUN go mod tidy
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/rpd-orchestrator ./cmd/worker
 
 WORKDIR /src
