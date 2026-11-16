@@ -167,9 +167,11 @@ Use RapidTable/SLANet for detected table regions. Reuse existing OCR boxes/text 
 
 Combine OCR blocks, table cells, reading order, headers, footers and sections. Persist `layout.json`, `reading_order.json` and `document.md`.
 
-## 7. Canonical invoice schema
+## 7. Canonical financial schemas
 
-Initial document type: invoice.
+The invoice schema remains backward-compatible. The runtime also supports schema-driven `supplier_statement` and `bank_statement` extraction. Statement results use a generic envelope with `fields`, `tables`, validation metadata and OCR evidence (page, block IDs and bounding boxes).
+
+### Invoice
 
 Header fields:
 
@@ -538,6 +540,11 @@ Non-goals for MVP: Kubernetes, dozens of microservices, fully autonomous financi
 - [x] runtime mapping aliases for document fields and table columns
 - [x] allowlisted transforms
 - [x] canonical invoice extraction
+- [x] schema-driven supplier-statement extraction
+- [x] schema-driven bank-statement extraction
+- [x] generic field persistence with OCR bbox provenance
+- [x] generic statement transaction-row persistence
+- [x] document-type validation dispatch
 - [x] line-item extraction
 - [x] required-field validation
 - [x] quantity × unit-price validation
@@ -635,8 +642,8 @@ Build vertical slices:
 1. Upload → storage → queue → job status.
 2. Preprocess → OCR/text JSON.
 3. OCR/text → fast classification → type routing.
-4. Invoice route → table → canonical invoice.
-5. Mapping → validation.
+4. Supported financial route → table → schema-driven canonical extraction.
+5. Document-type validation.
 6. ERP import → exact reconciliation.
 7. Tolerance → review → export.
 8. Agentic fallback.
