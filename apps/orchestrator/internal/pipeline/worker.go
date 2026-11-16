@@ -1072,6 +1072,7 @@ func (w *Worker) persistCanonicalRecords(
         evidenceJSON,_:=json.Marshal(map[string]any{
             "block_ids":entry.Value.Evidence.BlockIDs,
             "bbox":entry.Value.Evidence.BBox,
+            "bbox_normalized":entry.Value.Evidence.BBoxNormalized,
             "method":sourceMethod,
         })
 
@@ -1131,6 +1132,191 @@ func (w *Worker) persistCanonicalRecords(
     }
 
     return tx.Commit(ctx)
+}
+
+func (w *Worker) loadActiveLayoutProfiles(
+    ctx context.Context,
+    tenantID,documentType string,
+)([]map[string]any,error){
+    rows,err:=w.DB.Query(ctx,`
+      SELECT id::text,name,supplier_key,version,fingerprint_json::text,config_json::text,observation_count
+      FROM layout_profiles
+      WHERE tenant_id=$1 AND document_type=$2 AND status='ACTIVE'
+      ORDER BY last_seen_at DESC
+      LIMIT 64
+    `,tenantID,documentType)
+    if err!=nil { return nil,err }
+    defer rows.Close()
+
+    profiles:=make([]map[string]any,0)
+    for rows.Next(){
+        var id,name,supplierKey,fingerprintText,configText string
+        var version,observations int
+        if err:=rows.Scan(&id,&name,&supplierKey,&version,&fingerprintText,&configText,&observations); err!=nil {
+            return nil,err
+        }
+        fingerprint:=map[string]any{}
+        config:=map[string]any{}
+        if err:=json.Unmarshal([]byte(fingerprintText),&fingerprint); err!=nil { return nil,err }
+        if err:=json.Unmarshal([]byte(configText),&config); err!=nil { return nil,err }
+        profiles=append(profiles,map[string]any{
+            "id":id,
+            "name":name,
+            "supplier_key":supplierKey,
+            "version":version,
+            "fingerprint":fingerprint,
+            "config":config,
+            "observation_count":observations,
+        })
+    }
+    return profiles,rows.Err()
+}
+
+func normalizeLayoutKey(value string) string {
+    value=strings.ToLower(strings.TrimSpace(value))
+    parts:=strings.FieldsFunc(value,func(r rune) bool {
+        return !((r>='a' && r<='z') || (r>='0' && r<='9'))
+    })
+    return strings.Join(parts," ")
+}
+
+func layoutFieldType(name string) string {
+    switch name {
+    case "invoice_date","due_date","statement_date","period_start","period_end":
+        return "date"
+    case "subtotal","tax","grand_total","opening_balance","closing_balance":
+        return "decimal"
+    case "currency":
+        return "currency"
+    case "invoice_number","po_number","account_number":
+        return "identifier"
+    default:
+        return "string"
+    }
+}
+
+func canonicalLayoutConfig(canonicalBody []byte)(string,map[string]any,error){
+    var root map[string]any
+    if err:=json.Unmarshal(canonicalBody,&root); err!=nil {
+        return "",nil,err
+    }
+
+    fields:=map[string]any{}
+    if generic,ok:=root["fields"].(map[string]any); ok {
+        for name,value:=range generic { fields[name]=value }
+    } else {
+        for _,name:=range []string{
+            "supplier_name","supplier_code","invoice_number","invoice_date","due_date","po_number",
+            "currency","subtotal","tax","grand_total",
+        } {
+            if value,ok:=root[name]; ok && value!=nil { fields[name]=value }
+        }
+    }
+
+    supplierKey:=""
+    for _,name:=range []string{"supplier_name","institution_name","account_name"} {
+        field,ok:=fields[name].(map[string]any)
+        if !ok { continue }
+        if value,ok:=field["value"].(string); ok && strings.TrimSpace(value)!="" {
+            supplierKey=normalizeLayoutKey(value)
+            break
+        }
+    }
+
+    regions:=map[string]any{}
+    for name,rawField:=range fields {
+        field,ok:=rawField.(map[string]any)
+        if !ok { continue }
+        evidence,ok:=field["evidence"].(map[string]any)
+        if !ok { continue }
+        bbox,ok:=evidence["bbox_normalized"].([]any)
+        if !ok || len(bbox)!=4 { continue }
+
+        dataType:=layoutFieldType(name)
+        if value,ok:=field["data_type"].(string); ok && strings.TrimSpace(value)!="" {
+            dataType=strings.TrimSpace(value)
+        }
+        page:=1
+        if value,ok:=evidence["page"].(float64); ok && value>0 { page=int(value) }
+
+        raw,_:=field["raw"].(string)
+        value,_:=field["value"].(string)
+        rawPrefix:=""
+        if raw!="" && value!="" {
+            if index:=strings.Index(raw,value); index>0 {
+                rawPrefix=strings.TrimSpace(strings.Trim(raw[:index]," :#-\t"))
+            }
+        }
+        regions[name]=map[string]any{
+            "page":page,
+            "bbox_normalized":bbox,
+            "data_type":dataType,
+            "raw_prefix":rawPrefix,
+        }
+    }
+
+    return supplierKey,map[string]any{
+        "field_regions":regions,
+    },nil
+}
+
+func (w *Worker) observeLayoutProfile(
+    ctx context.Context,
+    job JobMessage,
+    documentType string,
+    canonicalBody []byte,
+    match LayoutMatchResponse,
+) error {
+    if match.Matched && strings.TrimSpace(match.MatchedProfileID)!="" {
+        _,err:=w.DB.Exec(ctx,`
+          UPDATE layout_profiles
+          SET observation_count=observation_count+1,last_seen_at=now(),updated_at=now()
+          WHERE tenant_id=$1 AND id=$2
+        `,job.TenantID,match.MatchedProfileID)
+        return err
+    }
+
+    hash:=strings.TrimSpace(match.FingerprintHash)
+    if hash=="" || len(match.Fingerprint)==0 { return nil }
+
+    supplierKey,config,err:=canonicalLayoutConfig(canonicalBody)
+    if err!=nil { return err }
+    fingerprintJSON,err:=json.Marshal(match.Fingerprint)
+    if err!=nil { return err }
+    configJSON,err:=json.Marshal(config)
+    if err!=nil { return err }
+
+    suffix:=hash
+    if len(suffix)>10 { suffix=suffix[:10] }
+    nameBase:=supplierKey
+    if nameBase=="" { nameBase=documentType }
+    profileName:=fmt.Sprintf("%s %s",nameBase,suffix)
+
+    _,err=w.DB.Exec(ctx,`
+      INSERT INTO layout_profiles
+        (tenant_id,document_type,supplier_key,name,version,status,fingerprint_hash,
+         fingerprint_json,config_json,observation_count,source)
+      VALUES ($1,$2,$3,$4,1,'CANDIDATE',$5,$6::jsonb,$7::jsonb,1,'AUTO_VALIDATED')
+      ON CONFLICT (tenant_id,document_type,fingerprint_hash)
+      DO UPDATE SET
+        supplier_key=CASE
+          WHEN EXCLUDED.supplier_key<>'' THEN EXCLUDED.supplier_key
+          ELSE layout_profiles.supplier_key
+        END,
+        config_json=CASE
+          WHEN EXCLUDED.config_json<>'{}'::jsonb THEN EXCLUDED.config_json
+          ELSE layout_profiles.config_json
+        END,
+        observation_count=layout_profiles.observation_count+1,
+        status=CASE
+          WHEN layout_profiles.status='ARCHIVED' THEN 'ARCHIVED'
+          WHEN layout_profiles.observation_count+1>=2 THEN 'ACTIVE'
+          ELSE layout_profiles.status
+        END,
+        last_seen_at=now(),
+        updated_at=now()
+    `,job.TenantID,documentType,supplierKey,profileName,hash,string(fingerprintJSON),string(configJSON))
+    return err
 }
 
 func (w *Worker) createDocumentVersion(ctx context.Context,job JobMessage,documentType string)(string,int,error){
