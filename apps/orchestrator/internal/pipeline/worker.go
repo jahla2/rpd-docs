@@ -75,6 +75,24 @@ type TableResponse struct {
     Elapsed *float64 `json:"elapsed"`
 }
 
+type ClassificationAlternative struct {
+    Type string `json:"type"`
+    Confidence float64 `json:"confidence"`
+}
+
+type ClassificationResponse struct {
+    SchemaVersion string `json:"schema_version"`
+    DocumentID string `json:"document_id"`
+    DocumentType string `json:"document_type"`
+    Confidence float64 `json:"confidence"`
+    Method string `json:"method"`
+    Model string `json:"model"`
+    ModelVersion string `json:"model_version"`
+    Alternatives []ClassificationAlternative `json:"alternatives"`
+    LatencyMS int64 `json:"latency_ms"`
+    RequiresReview bool `json:"requires_review"`
+}
+
 type CanonicalResponse struct {
     SchemaVersion string `json:"schema_version"`
     DocumentID string `json:"document_id"`
@@ -280,6 +298,57 @@ func (w *Worker) HandlePreprocess(ctx context.Context, job JobMessage) error {
     }
 
     if err:=w.setStatus(ctx,job,"OCR_COMPLETED",false,45); err!=nil { return w.fail(ctx,job,err) }
+    if err:=w.setStatus(ctx,job,"CLASSIFYING",false,47); err!=nil { return w.fail(ctx,job,err) }
+
+    classificationPages:=make([]map[string]any,0,native.PageCount)
+    for _,page:=range native.Pages {
+        classificationPages=append(classificationPages,map[string]any{
+            "page":page.Page,
+            "ocr_blocks":pageOCR[page.Page].Blocks,
+        })
+    }
+    classificationPayload:=map[string]any{
+        "document_id":job.DocumentID,
+        "pages":classificationPages,
+    }
+    if hint,ok:=job.Options["document_type"].(string); ok && strings.TrimSpace(hint)!="" {
+        classificationPayload["document_type_hint"]=strings.TrimSpace(hint)
+        classificationPayload["hint_source"]="explicit"
+    }
+
+    classificationBody,err:=w.postJSON(ctx,"/v1/classify",classificationPayload)
+    if err!=nil { return w.fail(ctx,job,fmt.Errorf("document classification: %w",err)) }
+
+    var classification ClassificationResponse
+    if err:=json.Unmarshal(classificationBody,&classification); err!=nil {
+        return w.fail(ctx,job,fmt.Errorf("decode classification result: %w",err))
+    }
+    if classification.SchemaVersion!="1.0" || classification.DocumentType=="" {
+        return w.fail(ctx,job,fmt.Errorf("invalid classification contract"))
+    }
+
+    classificationDir:=filepath.Join(w.StorageRoot,"tenants",job.TenantID,"processing",job.DocumentID,job.RunID,"classification")
+    classificationPath,err:=writeArtifactFile(classificationDir,"classification.json",classificationBody)
+    if err!=nil { return w.fail(ctx,job,err) }
+    if err:=w.addArtifact(ctx,job,"CLASSIFICATION_JSON",classificationPath,strPtr("application/json")); err!=nil {
+        return w.fail(ctx,job,err)
+    }
+    if err:=w.persistClassification(ctx,job,classification); err!=nil {
+        return w.fail(ctx,job,fmt.Errorf("persist classification: %w",err))
+    }
+    if err:=w.setStatus(ctx,job,"CLASSIFIED",false,49); err!=nil { return w.fail(ctx,job,err) }
+    _=w.emitEvent(ctx,job,"document.classified","CLASSIFIED",49,nil,&native.PageCount,map[string]any{
+        "document_type":classification.DocumentType,
+        "confidence":classification.Confidence,
+        "method":classification.Method,
+        "latency_ms":classification.LatencyMS,
+        "requires_review":classification.RequiresReview,
+    })
+
+    if classification.DocumentType!="invoice" {
+        return w.finalizeUnsupportedDocument(ctx,job,native.PageCount,classification)
+    }
+
     if err:=w.setStatus(ctx,job,"TABLE_PROCESSING",false,50); err!=nil { return w.fail(ctx,job,err) }
 
     for index,page:=range native.Pages {
@@ -632,6 +701,10 @@ func (w *Worker) trackStageTransition(ctx context.Context,job JobMessage,status 
         return w.startStage(ctx,job,"OCR")
     case "OCR_COMPLETED":
         return w.completeStage(ctx,job,"OCR")
+    case "CLASSIFYING":
+        return w.startStage(ctx,job,"CLASSIFY")
+    case "CLASSIFIED":
+        return w.completeStage(ctx,job,"CLASSIFY")
     case "TABLE_PROCESSING":
         return w.startStage(ctx,job,"TABLE")
     case "TABLES_COMPLETED":
@@ -680,6 +753,104 @@ func writeArtifactFile(dir,name string,data []byte)(string,error){
     path:=filepath.Join(dir,name)
     if err:=os.WriteFile(path,data,0o640); err!=nil { return "",err }
     return filepath.Abs(path)
+}
+
+func (w *Worker) persistClassification(ctx context.Context,job JobMessage,result ClassificationResponse) error {
+    alternatives,err:=json.Marshal(result.Alternatives)
+    if err!=nil { return err }
+    _,err=w.DB.Exec(ctx,`
+      INSERT INTO document_classifications
+        (tenant_id,document_id,job_id,run_id,document_type,confidence,method,model,model_version,
+         alternatives_json,latency_ms,requires_review)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,NULLIF($8,''),NULLIF($9,''),$10::jsonb,$11,$12)
+      ON CONFLICT (job_id)
+      DO UPDATE SET
+        document_type=EXCLUDED.document_type,
+        confidence=EXCLUDED.confidence,
+        method=EXCLUDED.method,
+        model=EXCLUDED.model,
+        model_version=EXCLUDED.model_version,
+        alternatives_json=EXCLUDED.alternatives_json,
+        latency_ms=EXCLUDED.latency_ms,
+        requires_review=EXCLUDED.requires_review,
+        created_at=now()
+    `,job.TenantID,job.DocumentID,job.JobID,job.RunID,result.DocumentType,result.Confidence,result.Method,
+      result.Model,result.ModelVersion,string(alternatives),result.LatencyMS,result.RequiresReview)
+    return err
+}
+
+func (w *Worker) finalizeUnsupportedDocument(
+    ctx context.Context,
+    job JobMessage,
+    pageCount int,
+    classification ClassificationResponse,
+) error {
+    canonicalBody,err:=json.MarshalIndent(map[string]any{
+        "schema_version":"1.0",
+        "document_id":job.DocumentID,
+        "document_type":classification.DocumentType,
+        "classification_confidence":classification.Confidence,
+        "classification_method":classification.Method,
+        "requires_review":true,
+        "review_reason":"type-specific extractor is not implemented",
+    },"","  ")
+    if err!=nil { return w.fail(ctx,job,err) }
+
+    validationResult:=validation.Result{
+        SchemaVersion:"1.0",
+        Valid:false,
+        RequiresReview:true,
+        Rules:[]validation.RuleResult{{
+            Code:"TYPE_SPECIFIC_EXTRACTOR_REQUIRED",
+            Status:"WARN",
+            Severity:"WARNING",
+            Message:fmt.Sprintf("document type %s requires a type-specific extractor",classification.DocumentType),
+            Evidence:map[string]any{
+                "document_type":classification.DocumentType,
+                "classification_confidence":classification.Confidence,
+                "classification_method":classification.Method,
+            },
+        }},
+    }
+    validationBody,err:=json.MarshalIndent(validationResult,"","  ")
+    if err!=nil { return w.fail(ctx,job,err) }
+
+    versionID,versionNumber,err:=w.createDocumentVersion(ctx,job,classification.DocumentType)
+    if err!=nil { return w.fail(ctx,job,err) }
+    if err:=w.persistCanonicalRecords(ctx,job,versionID,canonicalBody,validationResult); err!=nil {
+        return w.fail(ctx,job,fmt.Errorf("persist classified review document: %w",err))
+    }
+
+    finalDir:=filepath.Join(w.StorageRoot,"tenants",job.TenantID,"documents",job.DocumentID,versionID)
+    canonicalPath,err:=writeArtifactFile(finalDir,"canonical.json",canonicalBody)
+    if err!=nil { return w.fail(ctx,job,err) }
+    if err:=w.addVersionArtifact(ctx,job,versionID,"CANONICAL_JSON",canonicalPath,strPtr("application/json")); err!=nil {
+        return w.fail(ctx,job,err)
+    }
+    validationPath,err:=writeArtifactFile(finalDir,"validation.json",validationBody)
+    if err!=nil { return w.fail(ctx,job,err) }
+    if err:=w.addVersionArtifact(ctx,job,versionID,"VALIDATION_JSON",validationPath,strPtr("application/json")); err!=nil {
+        return w.fail(ctx,job,err)
+    }
+
+    reason:=fmt.Sprintf("document classified as %s; type-specific extractor is not implemented",classification.DocumentType)
+    if err:=w.createDocumentReviewTask(ctx,job,versionID,reason); err!=nil {
+        return w.fail(ctx,job,err)
+    }
+    if err:=w.setStatus(ctx,job,"REVIEW_REQUIRED",true,100); err!=nil { return err }
+    _=w.emitEvent(ctx,job,"review.required","REVIEW_REQUIRED",100,nil,&pageCount,map[string]any{
+        "document_version_id":versionID,
+        "document_type":classification.DocumentType,
+        "classification_confidence":classification.Confidence,
+        "reason":"type-specific extractor is not implemented",
+    })
+    if err:=w.completeStep(ctx,job); err!=nil { return err }
+
+    w.Logger.Info("document_classified_for_review",
+        "tenant_id",job.TenantID,"document_id",job.DocumentID,"job_id",job.JobID,
+        "document_version_id",versionID,"version_number",versionNumber,
+        "document_type",classification.DocumentType,"classification_confidence",classification.Confidence)
+    return nil
 }
 
 func (w *Worker) recordOCRRun(ctx context.Context,job JobMessage,ocr OCRResponse,latencyMs int64) error {
