@@ -90,3 +90,75 @@ def test_invoice_routes_to_existing_invoice_extractor():
     )
     assert result["document_type"] == "invoice"
     assert result["invoice_number"]["value"] == "INV-001"
+
+
+def positioned(block_id: str, text: str, bbox, confidence: float = 0.99):
+    return {
+        "block_id": block_id,
+        "text": text,
+        "bbox": bbox,
+        "confidence": confidence,
+    }
+
+
+def test_statement_extracts_below_and_multiline_value_with_normalized_evidence():
+    result = extract_financial_document(
+        "doc-layout-b",
+        "supplier_statement",
+        [{
+            "page": 1,
+            "image_width": 1000,
+            "image_height": 1400,
+            "ocr_blocks": [
+                positioned("b1", "Statement of Account", [50, 50, 350, 90]),
+                positioned("b2", "Supplier", [80, 150, 220, 180]),
+                positioned("b3", "ABC Trading", [80, 190, 260, 220]),
+                positioned("b4", "Services Division", [80, 225, 300, 255]),
+                positioned("b5", "Current Balance", [650, 150, 820, 180]),
+                positioned("b6", "6500.00", [650, 190, 790, 220]),
+            ],
+            "table_html": None,
+        }],
+    )
+
+    assert result["fields"]["supplier_name"]["value"] == "ABC Trading Services Division"
+    assert result["fields"]["supplier_name"]["evidence"]["method"] == "schema_geometry_below"
+    assert len(result["fields"]["supplier_name"]["evidence"]["block_ids"]) == 2
+    assert result["fields"]["closing_balance"]["value"] == "6500.00"
+    assert result["fields"]["closing_balance"]["evidence"]["bbox_normalized"] == [0.65, 0.13571, 0.79, 0.15714]
+
+
+def test_layout_profile_region_recovers_field_when_label_changed():
+    result = extract_financial_document(
+        "doc-profile",
+        "supplier_statement",
+        [{
+            "page": 1,
+            "image_width": 1000,
+            "image_height": 1400,
+            "ocr_blocks": [
+                positioned("b1", "Statement of Account", [50, 50, 350, 90]),
+                positioned("b2", "Supplier: ABC Trading", [80, 120, 320, 150]),
+                positioned("b3", "Amount Outstanding", [650, 150, 830, 180]),
+                positioned("b4", "7200.00", [650, 190, 790, 220]),
+            ],
+            "table_html": None,
+        }],
+        layout_match={
+            "matched": True,
+            "matched_profile_id": "profile-1",
+            "score": 0.94,
+            "config": {
+                "field_regions": {
+                    "closing_balance": {
+                        "page": 1,
+                        "bbox_normalized": [0.65, 0.135, 0.79, 0.158]
+                    }
+                }
+            }
+        },
+    )
+
+    assert result["fields"]["closing_balance"]["value"] == "7200.00"
+    assert result["fields"]["closing_balance"]["evidence"]["method"] == "layout_profile_region"
+    assert result["layout"]["matched_profile_id"] == "profile-1"
