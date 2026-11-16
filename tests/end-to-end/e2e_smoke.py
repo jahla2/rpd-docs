@@ -121,6 +121,54 @@ def build_supplier_statement(path: Path) -> None:
     pdf.save()
 
 
+def build_supplier_statement_layout_b(
+    path: Path,
+    *,
+    statement_date: str,
+    closing_balance: str,
+    closing_label: str = "Current Balance",
+    invoice_number: str = "INV-B01",
+) -> None:
+    # Landscape layout with label/value pairs split across lines.
+    pdf = canvas.Canvas(str(path), pagesize=(792, 612))
+    pdf.setFont("Helvetica-Bold", 16)
+    pdf.drawString(50, 555, "Statement of Account")
+    pdf.setFont("Helvetica", 11)
+
+    pdf.drawString(50, 515, "Supplier")
+    pdf.drawString(50, 492, "ABC Trading")
+    pdf.drawString(500, 515, "Statement Date")
+    pdf.drawString(500, 492, statement_date)
+    pdf.drawString(50, 455, "Currency: PHP")
+    pdf.drawString(250, 455, "Previous Balance: 5000.00")
+    pdf.drawString(500, 455, closing_label)
+    pdf.drawString(500, 432, closing_balance)
+
+    y = 350
+    pdf.line(45, y + 20, 745, y + 20)
+    pdf.drawString(50, y, "Date")
+    pdf.drawString(185, y, "Invoice No")
+    pdf.drawString(360, y, "Debit")
+    pdf.drawString(470, y, "Credit")
+    pdf.drawString(610, y, "Balance")
+    pdf.line(45, y - 8, 745, y - 8)
+    pdf.drawString(50, y - 30, "2026-11-10")
+    pdf.drawString(185, y - 30, invoice_number)
+    pdf.drawString(360, y - 30, "1500.00")
+    pdf.drawString(610, y - 30, closing_balance)
+    pdf.line(45, y - 40, 745, y - 40)
+    pdf.save()
+
+
+def upload_pdf(path: Path, filename: str) -> dict:
+    with path.open("rb") as handle:
+        return api(
+            "POST",
+            "/api/v1/documents",
+            files={"file": (filename, handle, "application/pdf")},
+        ).json()
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="rpd-e2e-") as tmp:
         tmp_path = Path(tmp)
@@ -290,6 +338,59 @@ def main() -> None:
         ):
             raise AssertionError(f"statement classification step missing: {statement_steps}")
 
+        # Learn a second supplier layout. The first two validated observations
+        # create/promote its profile; the third changes a field label and must
+        # recover closing_balance using the learned normalized region.
+        learned_layout_ids = []
+        for index, (date_value, balance_value) in enumerate(
+            [("2026-12-01", "7100.00"), ("2026-12-02", "7200.00")],
+            start=1,
+        ):
+            layout_path = tmp_path / f"supplier-layout-b-{index}.pdf"
+            build_supplier_statement_layout_b(
+                layout_path,
+                statement_date=date_value,
+                closing_balance=balance_value,
+                invoice_number=f"INV-B0{index}",
+            )
+            learned_upload = upload_pdf(layout_path, layout_path.name)
+            wait_for_document_status(learned_upload["job_id"], "COMPLETED")
+            learned_result = api(
+                "GET",
+                f"/api/v1/documents/{learned_upload['document_id']}/result",
+            ).json()
+            learned_fields = learned_result.get("fields") or {}
+            if ((learned_fields.get("closing_balance") or {}).get("value") or "") != balance_value:
+                raise AssertionError(f"layout B learning extraction failed: {learned_result}")
+            learned_layout_ids.append(learned_upload["document_id"])
+
+        adaptive_path = tmp_path / "supplier-layout-b-adaptive.pdf"
+        build_supplier_statement_layout_b(
+            adaptive_path,
+            statement_date="2026-12-03",
+            closing_balance="7300.00",
+            closing_label="Amount Outstanding",
+            invoice_number="INV-B03",
+        )
+        adaptive_upload = upload_pdf(adaptive_path, adaptive_path.name)
+        wait_for_document_status(adaptive_upload["job_id"], "COMPLETED")
+        adaptive_result = api(
+            "GET",
+            f"/api/v1/documents/{adaptive_upload['document_id']}/result",
+        ).json()
+        adaptive_layout = adaptive_result.get("layout") or {}
+        adaptive_fields = adaptive_result.get("fields") or {}
+        adaptive_closing = adaptive_fields.get("closing_balance") or {}
+
+        if adaptive_layout.get("matched") is not True:
+            raise AssertionError(f"learned layout was not matched: {adaptive_result}")
+        if float(adaptive_layout.get("score") or 0.0) < 0.72:
+            raise AssertionError(f"learned layout score too low: {adaptive_layout}")
+        if (adaptive_closing.get("value") or "") != "7300.00":
+            raise AssertionError(f"layout profile did not recover closing balance: {adaptive_result}")
+        if ((adaptive_closing.get("evidence") or {}).get("method") or "") != "layout_profile_region":
+            raise AssertionError(f"closing balance did not use learned region: {adaptive_closing}")
+
         print(
             json.dumps(
                 {
@@ -302,6 +403,10 @@ def main() -> None:
                     "statement_document_id": statement_document_id,
                     "statement_job_id": statement_job_id,
                     "statement_type": statement_document.get("document_type"),
+                    "learned_layout_document_ids": learned_layout_ids,
+                    "adaptive_layout_document_id": adaptive_upload["document_id"],
+                    "adaptive_layout_profile_id": adaptive_layout.get("matched_profile_id"),
+                    "adaptive_layout_score": adaptive_layout.get("score"),
                     "status": "PASS",
                 },
                 indent=2,
