@@ -240,3 +240,94 @@ func TestValidateTemplateConfigRejectsComputePrimaryOperandReuse(t *testing.T){
         t.Fatal("expected primary operand reuse to fail")
     }
 }
+
+
+func TestValidateTemplateConfigAllowsSupplierLookup(t *testing.T){
+    raw:=json.RawMessage(`{
+      "columns":[
+        {
+          "source_aliases":["Supplier Name"],
+          "target":"supplier_id",
+          "type":"identifier",
+          "operations":[
+            {
+              "operation":"lookup",
+              "config":{
+                "registry":"supplier_master",
+                "source_field":"supplier_name",
+                "on_missing":"review"
+              }
+            }
+          ]
+        }
+      ]
+    }`)
+    config,err:=ValidateTemplateConfig(raw)
+    if err!=nil { t.Fatal(err) }
+    lookup:=config.Columns[0].Operations[0]
+    if lookup.Operation!="lookup" { t.Fatalf("operation=%q",lookup.Operation) }
+    if lookup.Config["registry"]!="supplier_master" ||
+       lookup.Config["source_field"]!="supplier_name" ||
+       lookup.Config["on_missing"]!="review" {
+        t.Fatalf("config=%#v",lookup.Config)
+    }
+}
+
+func TestValidateTemplateConfigRejectsUnsafeSupplierLookup(t *testing.T){
+    cases:=[]string{
+        `{"registry":"users","source_field":"supplier_name","on_missing":"review"}`,
+        `{"registry":"supplier_master","source_field":"sql","on_missing":"review"}`,
+        `{"registry":"supplier_master","source_field":"supplier_name","on_missing":"guess"}`,
+        `{"registry":"supplier_master","source_field":"supplier_name","sql":"SELECT *"}`,
+    }
+    for _,lookupConfig:=range cases {
+        raw:=json.RawMessage(`{
+          "columns":[
+            {
+              "source_aliases":["Supplier Name"],
+              "target":"supplier_id",
+              "type":"identifier",
+              "operations":[{"operation":"lookup","config":`+lookupConfig+`}]
+            }
+          ]
+        }`)
+        if _,err:=ValidateTemplateConfig(raw); err==nil {
+            t.Fatalf("expected lookup config to fail: %s",lookupConfig)
+        }
+    }
+}
+
+func TestValidateTemplateConfigRejectsLookupWrongTargetOrChaining(t *testing.T){
+    wrongTarget:=json.RawMessage(`{
+      "columns":[
+        {
+          "source_aliases":["Supplier Name"],
+          "target":"supplier_code",
+          "type":"identifier",
+          "operations":[
+            {"operation":"lookup","config":{"registry":"supplier_master","source_field":"supplier_name"}}
+          ]
+        }
+      ]
+    }`)
+    if _,err:=ValidateTemplateConfig(wrongTarget); err==nil {
+        t.Fatal("expected supplier lookup wrong target to fail")
+    }
+
+    chained:=json.RawMessage(`{
+      "columns":[
+        {
+          "source_aliases":["Supplier Name"],
+          "target":"supplier_id",
+          "type":"identifier",
+          "operations":[
+            {"operation":"normalize"},
+            {"operation":"lookup","config":{"registry":"supplier_master","source_field":"supplier_name"}}
+          ]
+        }
+      ]
+    }`)
+    if _,err:=ValidateTemplateConfig(chained); err==nil {
+        t.Fatal("expected lookup chaining to fail")
+    }
+}
