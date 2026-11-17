@@ -22,6 +22,7 @@ type InvoiceLine struct {
     UnitPrice string `json:"unit_price,omitempty"`
     Tax string `json:"tax,omitempty"`
     LineTotal string `json:"line_total,omitempty"`
+    CalculatedLineTotal string `json:"calculated_line_total,omitempty"`
 }
 
 type Invoice struct {
