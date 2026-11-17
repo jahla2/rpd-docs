@@ -4,7 +4,7 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from html.parser import HTMLParser
 
 
@@ -150,6 +150,18 @@ def _combine_aliases(raw: object) -> list[str] | None:
     return aliases if aliases else None
 
 
+def _compute_decimal(value: str) -> Decimal | None:
+    if len(value) > 128:
+        return None
+    normalized = normalize_decimal(value)
+    if normalized is None or len(normalized) > 128:
+        return None
+    try:
+        return Decimal(normalized)
+    except InvalidOperation:
+        return None
+
+
 def _apply_operations(
     value: str,
     operations: list[dict],
@@ -225,6 +237,53 @@ def _apply_operations(
                     break
                 parts.append(additional.strip())
             current = None if failed else separator.join(parts)
+        elif name == "compute" and current is not None:
+            operator = str(config.get("operator", "")).strip().lower()
+            operand = config.get("operand")
+            scale = config.get("scale")
+            if (
+                operator not in {"add", "subtract", "multiply", "divide"}
+                or not isinstance(operand, str)
+                or not normalize_header(operand)
+                or len(operand.encode("utf-8")) > 200
+                or not isinstance(scale, int)
+                or isinstance(scale, bool)
+                or scale < 0
+                or scale > 8
+            ):
+                current = None
+                continue
+
+            source_context = context or {}
+            operand_value = source_context.get(normalize_header(operand))
+            if operand_value is None:
+                current = None
+                continue
+            left = _compute_decimal(current)
+            right = _compute_decimal(operand_value)
+            if left is None or right is None:
+                current = None
+                continue
+
+            if operator == "add":
+                result = left + right
+            elif operator == "subtract":
+                result = left - right
+            elif operator == "multiply":
+                result = left * right
+            else:
+                if right == 0:
+                    current = None
+                    continue
+                result = left / right
+
+            quantizer = Decimal(1).scaleb(-scale)
+            try:
+                result = result.quantize(quantizer, rounding=ROUND_HALF_UP)
+            except InvalidOperation:
+                current = None
+                continue
+            current = format(result, "f")
     return current, excluded
 
 
@@ -293,7 +352,7 @@ def extract_line_items(table_html: str | None, mapping_config: dict | None = Non
                     continue
                 strict_transform = any(
                     str(operation.get("operation", "")).strip().lower()
-                    in {"split", "combine"}
+                    in {"split", "combine", "compute"}
                     for operation in operations
                 )
                 if strict_transform and transformed is None:
@@ -304,7 +363,10 @@ def extract_line_items(table_html: str | None, mapping_config: dict | None = Non
                     transformed = normalized if normalized is not None else value
                 item[target] = transformed if transformed is not None else value
 
-        if item and any(item.get(key) for key in ("description", "item_code", "line_total")):
+        if item and any(
+            item.get(key)
+            for key in ("description", "item_code", "line_total", "calculated_line_total")
+        ):
             items.append(item)
 
     return items, {
@@ -417,15 +479,22 @@ def _search_alias(
             operations = list(rule.get("operations") or [])
             operation_context: dict[str, str] = {}
             for operation in operations:
-                if str(operation.get("operation", "")).strip().lower() != "combine":
-                    continue
-                aliases = _combine_aliases((operation.get("config") or {}).get("with"))
-                if aliases is None:
-                    continue
-                for combine_alias in aliases:
-                    additional = _extract_alias_value(blocks, combine_alias)
-                    if additional is not None:
-                        operation_context[normalize_header(combine_alias)] = additional
+                operation_name = str(operation.get("operation", "")).strip().lower()
+                operation_config = operation.get("config") or {}
+                if operation_name == "combine":
+                    aliases = _combine_aliases(operation_config.get("with"))
+                    if aliases is None:
+                        continue
+                    for combine_alias in aliases:
+                        additional = _extract_alias_value(blocks, combine_alias)
+                        if additional is not None:
+                            operation_context[normalize_header(combine_alias)] = additional
+                elif operation_name == "compute":
+                    operand = operation_config.get("operand")
+                    if isinstance(operand, str) and normalize_header(operand):
+                        additional = _extract_alias_value(blocks, operand)
+                        if additional is not None:
+                            operation_context[normalize_header(operand)] = additional
 
             transformed, excluded = _apply_operations(
                 raw_value,
