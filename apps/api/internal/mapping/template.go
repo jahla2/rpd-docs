@@ -47,6 +47,7 @@ var allowedTargets=map[string]bool{
     "unit":true,
     "unit_price":true,
     "line_total":true,
+    "calculated_line_total":true,
 }
 
 var allowedTypes=map[string]bool{
@@ -64,6 +65,7 @@ var allowedOperations=map[string]bool{
     "exclude":true,
     "split":true,
     "combine":true,
+    "compute":true,
 }
 
 func ValidateTemplateConfig(raw json.RawMessage)(TemplateConfig,error){
@@ -137,6 +139,28 @@ func ValidateTemplateConfig(raw json.RawMessage)(TemplateConfig,error){
                             "column %d operation %d combine source %q duplicates primary source",
                             index,operationIndex,alias)
                     }
+                }
+                config.Columns[index].Operations[operationIndex].Config=normalizedConfig
+            }
+            if op=="compute" {
+                if column.Type!="decimal" {
+                    return TemplateConfig{},fmt.Errorf(
+                        "column %d operation %d compute requires decimal type",
+                        index,operationIndex)
+                }
+                normalizedConfig,err:=validateComputeConfig(operation.Config)
+                if err!=nil {
+                    return TemplateConfig{},fmt.Errorf(
+                        "column %d operation %d compute config: %w",
+                        index,operationIndex,err)
+                }
+                primaryAliases:=map[string]bool{}
+                for _,alias:=range aliases { primaryAliases[NormalizeHeader(alias)]=true }
+                operand:=normalizedConfig["operand"].(string)
+                if primaryAliases[NormalizeHeader(operand)] {
+                    return TemplateConfig{},fmt.Errorf(
+                        "column %d operation %d compute operand %q duplicates primary source",
+                        index,operationIndex,operand)
                 }
                 config.Columns[index].Operations[operationIndex].Config=normalizedConfig
             }
@@ -273,5 +297,50 @@ func validateCombineConfig(config map[string]any)(map[string]any,error){
         "with":aliases,
         "separator":separator,
         "skip_empty":skipEmpty,
+    },nil
+}
+
+
+func validateComputeConfig(config map[string]any)(map[string]any,error){
+    if config==nil { return nil,fmt.Errorf("config is required") }
+    for key:=range config {
+        switch key {
+        case "operator","operand","scale":
+        default:
+            return nil,fmt.Errorf("unsupported key %q",key)
+        }
+    }
+
+    operator,ok:=config["operator"].(string)
+    if !ok { return nil,fmt.Errorf("operator is required") }
+    operator=strings.ToLower(strings.TrimSpace(operator))
+    switch operator {
+    case "add","subtract","multiply","divide":
+    default:
+        return nil,fmt.Errorf("operator must be add, subtract, multiply, or divide")
+    }
+
+    operand,ok:=config["operand"].(string)
+    if !ok || NormalizeHeader(operand)=="" {
+        return nil,fmt.Errorf("operand must be a non-empty source alias")
+    }
+    operand=strings.TrimSpace(operand)
+    if len(operand)>200 { return nil,fmt.Errorf("operand must be at most 200 bytes") }
+
+    rawScale,ok:=config["scale"]
+    if !ok { return nil,fmt.Errorf("scale is required") }
+    scale:=-1
+    switch value:=rawScale.(type) {
+    case float64:
+        if value>=0 && value<=8 && value==float64(int(value)) { scale=int(value) }
+    case int:
+        if value>=0 && value<=8 { scale=value }
+    }
+    if scale<0 { return nil,fmt.Errorf("scale must be an integer between 0 and 8") }
+
+    return map[string]any{
+        "operator":operator,
+        "operand":operand,
+        "scale":scale,
     },nil
 }
