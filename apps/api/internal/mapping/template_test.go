@@ -150,3 +150,93 @@ func TestValidateTemplateConfigRejectsCombinePrimarySourceReuse(t *testing.T){
         t.Fatal("expected primary source reuse to fail")
     }
 }
+
+
+func TestValidateTemplateConfigAllowsSafeCompute(t *testing.T){
+    raw:=json.RawMessage(`{
+      "columns":[
+        {
+          "source_aliases":["Quantity"],
+          "target":"calculated_line_total",
+          "type":"decimal",
+          "operations":[
+            {
+              "operation":"compute",
+              "config":{"operator":"multiply","operand":"Unit Price","scale":2}
+            }
+          ]
+        }
+      ]
+    }`)
+    config,err:=ValidateTemplateConfig(raw)
+    if err!=nil { t.Fatal(err) }
+    compute:=config.Columns[0].Operations[0]
+    if compute.Operation!="compute" { t.Fatalf("operation=%q",compute.Operation) }
+    if compute.Config["operator"]!="multiply" ||
+       compute.Config["operand"]!="Unit Price" ||
+       compute.Config["scale"]!=2 {
+        t.Fatalf("config=%#v",compute.Config)
+    }
+}
+
+func TestValidateTemplateConfigRejectsUnsafeCompute(t *testing.T){
+    cases:=[]string{
+        `{}`,
+        `{"operator":"eval","operand":"Unit Price","scale":2}`,
+        `{"operator":"multiply","operand":"","scale":2}`,
+        `{"operator":"multiply","operand":"Unit Price"}`,
+        `{"operator":"multiply","operand":"Unit Price","scale":9}`,
+        `{"operator":"multiply","operand":"Unit Price","scale":2,"script":"x"}`,
+    }
+    for _,computeConfig:=range cases {
+        raw:=json.RawMessage(`{
+          "columns":[
+            {
+              "source_aliases":["Quantity"],
+              "target":"calculated_line_total",
+              "type":"decimal",
+              "operations":[{"operation":"compute","config":`+computeConfig+`}]
+            }
+          ]
+        }`)
+        if _,err:=ValidateTemplateConfig(raw); err==nil {
+            t.Fatalf("expected compute config to fail: %s",computeConfig)
+        }
+    }
+}
+
+func TestValidateTemplateConfigRejectsComputeOnNonDecimalTarget(t *testing.T){
+    raw:=json.RawMessage(`{
+      "columns":[
+        {
+          "source_aliases":["Quantity"],
+          "target":"description",
+          "type":"string",
+          "operations":[
+            {"operation":"compute","config":{"operator":"multiply","operand":"Unit Price","scale":2}}
+          ]
+        }
+      ]
+    }`)
+    if _,err:=ValidateTemplateConfig(raw); err==nil {
+        t.Fatal("expected compute on non-decimal target to fail")
+    }
+}
+
+func TestValidateTemplateConfigRejectsComputePrimaryOperandReuse(t *testing.T){
+    raw:=json.RawMessage(`{
+      "columns":[
+        {
+          "source_aliases":["Quantity"],
+          "target":"calculated_line_total",
+          "type":"decimal",
+          "operations":[
+            {"operation":"compute","config":{"operator":"multiply","operand":"Quantity","scale":2}}
+          ]
+        }
+      ]
+    }`)
+    if _,err:=ValidateTemplateConfig(raw); err==nil {
+        t.Fatal("expected primary operand reuse to fail")
+    }
+}
