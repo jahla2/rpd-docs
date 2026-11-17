@@ -264,3 +264,87 @@ func TestPreviewTemplateCombineSkipEmptyAllowsOptionalSource(t *testing.T){
         t.Fatalf("supplier_name=%q",got)
     }
 }
+
+
+func TestPreviewTemplateAppliesCompute(t *testing.T){
+    raw:=json.RawMessage(`{
+      "columns":[
+        {
+          "source_aliases":["Quantity"],
+          "target":"calculated_line_total",
+          "type":"decimal",
+          "required":true,
+          "operations":[
+            {
+              "operation":"compute",
+              "config":{"operator":"multiply","operand":"Unit Price","scale":2}
+            }
+          ]
+        }
+      ]
+    }`)
+    config,err:=ValidateTemplateConfig(raw)
+    if err!=nil { t.Fatal(err) }
+
+    preview:=PreviewTemplate(
+        config,
+        []string{"Quantity","Unit Price"},
+        map[string][]string{
+            "Quantity":{"2"},
+            "Unit Price":{"500.00"},
+        },
+    )
+    if len(preview.ValidationErrors)!=0 { t.Fatalf("errors=%v",preview.ValidationErrors) }
+    if got:=preview.SampleTransformedRows[0]["calculated_line_total"]; got!="1000.00" {
+        t.Fatalf("calculated_line_total=%q",got)
+    }
+}
+
+func TestPreviewTemplateComputeMissingOperandFailsClosed(t *testing.T){
+    raw:=json.RawMessage(`{
+      "columns":[
+        {
+          "source_aliases":["Quantity"],
+          "target":"calculated_line_total",
+          "type":"decimal",
+          "operations":[
+            {
+              "operation":"compute",
+              "config":{"operator":"multiply","operand":"Unit Price","scale":2}
+            }
+          ]
+        }
+      ]
+    }`)
+    config,err:=ValidateTemplateConfig(raw)
+    if err!=nil { t.Fatal(err) }
+
+    preview:=PreviewTemplate(
+        config,
+        []string{"Quantity"},
+        map[string][]string{"Quantity":{"2"}},
+    )
+    if len(preview.ValidationErrors)==0 {
+        t.Fatalf("expected missing compute operand error: %#v",preview)
+    }
+    if got:=preview.SampleTransformedRows[0]["calculated_line_total"]; got!="" {
+        t.Fatalf("expected fail-closed compute output, got %q",got)
+    }
+}
+
+func TestApplyOperationsComputeDivideByZeroFailsClosed(t *testing.T){
+    value,excluded:=ApplyOperationsWithContext(
+        "10",
+        []Transform{{
+            Operation:"compute",
+            Config:map[string]any{
+                "operator":"divide",
+                "operand":"Divisor",
+                "scale":2,
+            },
+        }},
+        map[string]string{"divisor":"0"},
+    )
+    if excluded { t.Fatal("compute should not mark excluded") }
+    if value!=nil { t.Fatalf("value=%q",*value) }
+}
