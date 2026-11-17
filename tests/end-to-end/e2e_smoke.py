@@ -748,6 +748,111 @@ def main() -> None:
                 f"compute transform was not applied by runtime: {compute_result}"
             )
 
+        # Supplier lookup is exact, tenant-scoped, and resolved by the
+        # API/orchestrator rather than by the OCR service.
+        supplier = api(
+            "POST",
+            "/api/v1/suppliers",
+            json={
+                "supplier_name": "ABC Trading",
+                "supplier_code": "SUP001",
+            },
+        ).json()
+        supplier_id = supplier["id"]
+        api(
+            "POST",
+            f"/api/v1/suppliers/{supplier_id}/aliases",
+            json={"alias": "ABC Trading Ltd."},
+        )
+
+        lookup_template = api(
+            "POST",
+            "/api/v1/mapping-templates",
+            json={
+                "name": "e2e-supplier-lookup",
+                "document_type": "invoice",
+                "config": {
+                    "columns": [
+                        {
+                            "source_aliases": ["Supplier Name"],
+                            "target": "supplier_id",
+                            "type": "identifier",
+                            "required": False,
+                            "operations": [
+                                {
+                                    "operation": "lookup",
+                                    "config": {
+                                        "registry": "supplier_master",
+                                        "source_field": "supplier_name",
+                                        "on_missing": "review",
+                                    },
+                                }
+                            ],
+                        }
+                    ]
+                },
+            },
+        ).json()
+        lookup_template_id = lookup_template["id"]
+
+        lookup_preview = api(
+            "POST",
+            f"/api/v1/mapping-templates/{lookup_template_id}/preview",
+            json={
+                "headers": ["Supplier Name"],
+                "samples": {"Supplier Name": ["ABC Trading Ltd."]},
+            },
+        ).json()
+        lookup_rows = lookup_preview.get("sample_transformed_rows") or []
+        if (
+            not lookup_rows
+            or lookup_rows[0].get("supplier_id") != supplier_id
+            or lookup_preview.get("validation_errors")
+        ):
+            raise AssertionError(
+                f"supplier lookup preview failed: {lookup_preview}"
+            )
+
+        missing_lookup_preview = api(
+            "POST",
+            f"/api/v1/mapping-templates/{lookup_template_id}/preview",
+            json={
+                "headers": ["Supplier Name"],
+                "samples": {"Supplier Name": ["Unknown Supplier"]},
+            },
+        ).json()
+        if not (missing_lookup_preview.get("validation_errors") or []):
+            raise AssertionError(
+                f"missing supplier lookup did not require review: {missing_lookup_preview}"
+            )
+
+        activated_lookup_template = api(
+            "POST",
+            f"/api/v1/mapping-templates/{lookup_template_id}/activate",
+        ).json()
+        if activated_lookup_template.get("status") != "ACTIVE":
+            raise AssertionError(
+                f"lookup template activation failed: {activated_lookup_template}"
+            )
+
+        lookup_reprocess = api(
+            "POST",
+            f"/api/v1/documents/{document_id}/reprocess",
+            json={"mapping_template_id": lookup_template_id},
+        ).json()
+        wait_for_job(lookup_reprocess["job_id"])
+        lookup_result = api(
+            "GET",
+            f"/api/v1/documents/{document_id}/result",
+        ).json()
+        resolved_supplier_id = (
+            (lookup_result.get("supplier_id") or {}).get("value") or ""
+        ).strip()
+        if resolved_supplier_id != supplier_id:
+            raise AssertionError(
+                f"supplier lookup was not applied by runtime: {lookup_result}"
+            )
+
         print(
             json.dumps(
                 {
