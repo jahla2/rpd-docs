@@ -30,6 +30,7 @@ type Invoice struct {
     DocumentID string `json:"document_id"`
     SupplierName Field `json:"supplier_name"`
     SupplierCode *Field `json:"supplier_code,omitempty"`
+    SupplierID *Field `json:"supplier_id,omitempty"`
     InvoiceNumber Field `json:"invoice_number"`
     InvoiceDate Field `json:"invoice_date"`
     DueDate *Field `json:"due_date,omitempty"`
