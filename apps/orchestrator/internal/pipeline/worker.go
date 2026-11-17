@@ -130,6 +130,7 @@ type CanonicalField struct {
 type CanonicalInvoiceDocument struct {
     SupplierName *CanonicalField `json:"supplier_name"`
     SupplierCode *CanonicalField `json:"supplier_code"`
+    SupplierID *CanonicalField `json:"supplier_id"`
     InvoiceNumber *CanonicalField `json:"invoice_number"`
     InvoiceDate *CanonicalField `json:"invoice_date"`
     DueDate *CanonicalField `json:"due_date"`
@@ -508,6 +509,9 @@ func (w *Worker) HandlePreprocess(ctx context.Context, job JobMessage) error {
     }
     canonicalBody,err:=w.postJSON(ctx,"/v1/extract/financial-document",extractPayload)
     if err!=nil { return w.fail(ctx,job,fmt.Errorf("%s extraction: %w",classification.DocumentType,err)) }
+
+    canonicalBody,err=w.applyLookupTransforms(ctx,job,canonicalBody)
+    if err!=nil { return w.fail(ctx,job,fmt.Errorf("apply lookup transforms: %w",err)) }
 
     var canonical CanonicalResponse
     if err:=json.Unmarshal(canonicalBody,&canonical); err!=nil {
@@ -1042,6 +1046,7 @@ func (w *Worker) persistCanonicalRecords(
         fields=[]persistedField{
             {"supplier_name","string",invoice.SupplierName},
             {"supplier_code","identifier",invoice.SupplierCode},
+            {"supplier_id","identifier",invoice.SupplierID},
             {"invoice_number","identifier",invoice.InvoiceNumber},
             {"invoice_date","date",invoice.InvoiceDate},
             {"due_date","date",invoice.DueDate},
