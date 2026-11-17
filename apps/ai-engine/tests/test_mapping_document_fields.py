@@ -103,3 +103,41 @@ def test_combine_operation_applies_to_document_field_aliases():
     )
     assert result["supplier_name"]["value"] == "ABC Trading"
     assert result["requires_review"] is False
+
+
+
+def test_compute_operation_applies_to_document_numeric_fields():
+    config = {
+        "columns": [
+            {
+                "source_aliases": ["Subtotal"],
+                "target": "grand_total",
+                "type": "decimal",
+                "operations": [
+                    {
+                        "operation": "compute",
+                        "config": {
+                            "operator": "add",
+                            "operand": "Tax",
+                            "scale": 2,
+                        },
+                    }
+                ],
+            }
+        ]
+    }
+    blocks = [
+        {"block_id": "b1", "text": "ABC Trading", "bbox": box(), "confidence": 1.0},
+        {"block_id": "b2", "text": "Invoice Number: INV-001", "bbox": box(), "confidence": 1.0},
+        {"block_id": "b3", "text": "Invoice Date: 2026-11-16", "bbox": box(), "confidence": 1.0},
+        {"block_id": "b4", "text": "Currency: PHP", "bbox": box(), "confidence": 1.0},
+        {"block_id": "b5", "text": "Subtotal: 100.00", "bbox": box(), "confidence": 1.0},
+        {"block_id": "b6", "text": "Tax: 20.00", "bbox": box(), "confidence": 1.0},
+    ]
+    result = extract_invoice_document(
+        "doc-compute",
+        [{"page": 1, "ocr_blocks": blocks, "table_html": None}],
+        config,
+    )
+    assert result["grand_total"]["value"] == "120.00"
+    assert result["requires_review"] is False
