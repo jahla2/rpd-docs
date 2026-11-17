@@ -95,20 +95,31 @@ func PreviewTemplate(config TemplateConfig, headers []string, samples map[string
     for _,header:=range headers { normalizedHeaders[NormalizeHeader(header)]=true }
     for _,rule:=range config.Columns {
         for _,operation:=range rule.Operations {
-            if operation.Operation!="combine" { continue }
-            aliases,ok:=combineAliases(operation.Config["with"])
-            if !ok { continue }
-            skipEmpty:=false
-            if rawSkip,exists:=operation.Config["skip_empty"]; exists {
-                parsed,ok:=rawSkip.(bool)
-                if ok { skipEmpty=parsed }
-            }
-            if skipEmpty { continue }
-            for _,alias:=range aliases {
-                if !normalizedHeaders[NormalizeHeader(alias)] {
+            switch operation.Operation {
+            case "combine":
+                aliases,ok:=combineAliases(operation.Config["with"])
+                if !ok { continue }
+                skipEmpty:=false
+                if rawSkip,exists:=operation.Config["skip_empty"]; exists {
+                    parsed,ok:=rawSkip.(bool)
+                    if ok { skipEmpty=parsed }
+                }
+                if skipEmpty { continue }
+                for _,alias:=range aliases {
+                    if !normalizedHeaders[NormalizeHeader(alias)] {
+                        preview.ValidationErrors=append(
+                            preview.ValidationErrors,
+                            fmt.Sprintf("target %q combine source %q was not found",rule.Target,alias),
+                        )
+                    }
+                }
+            case "compute":
+                operand,ok:=operation.Config["operand"].(string)
+                if !ok || NormalizeHeader(operand)=="" { continue }
+                if !normalizedHeaders[NormalizeHeader(operand)] {
                     preview.ValidationErrors=append(
                         preview.ValidationErrors,
-                        fmt.Sprintf("target %q combine source %q was not found",rule.Target,alias),
+                        fmt.Sprintf("target %q compute operand %q was not found",rule.Target,operand),
                     )
                 }
             }
@@ -226,6 +237,36 @@ func ApplyOperationsWithContext(value string, operations []Transform, context ma
                 parts=append(parts,strings.TrimSpace(additional))
             }
             current=strings.Join(parts,separator)
+        case "compute":
+            operator,ok:=operation.Config["operator"].(string)
+            if !ok { return nil,false }
+            operand,ok:=operation.Config["operand"].(string)
+            if !ok || NormalizeHeader(operand)=="" { return nil,false }
+            scale,ok:=computeScale(operation.Config["scale"])
+            if !ok { return nil,false }
+
+            rightValue,exists:=context[NormalizeHeader(operand)]
+            if !exists { return nil,false }
+            left,ok:=previewDecimalRat(current)
+            if !ok { return nil,false }
+            right,ok:=previewDecimalRat(rightValue)
+            if !ok { return nil,false }
+
+            result:=new(big.Rat)
+            switch strings.ToLower(strings.TrimSpace(operator)) {
+            case "add":
+                result.Add(left,right)
+            case "subtract":
+                result.Sub(left,right)
+            case "multiply":
+                result.Mul(left,right)
+            case "divide":
+                if right.Sign()==0 { return nil,false }
+                result.Quo(left,right)
+            default:
+                return nil,false
+            }
+            current=result.FloatString(scale)
         }
     }
 
@@ -305,4 +346,23 @@ func combineAliases(raw any)([]string,bool){
     default:
         return nil,false
     }
+}
+
+
+func computeScale(raw any)(int,bool){
+    switch value:=raw.(type) {
+    case int:
+        if value>=0 && value<=8 { return value,true }
+    case float64:
+        if value>=0 && value<=8 && value==float64(int(value)) { return int(value),true }
+    }
+    return 0,false
+}
+
+func previewDecimalRat(value string)(*big.Rat,bool){
+    if len(value)>128 { return nil,false }
+    normalized:=normalizePreviewDecimal(value)
+    if normalized==nil || len(*normalized)>128 { return nil,false }
+    parsed,ok:=new(big.Rat).SetString(*normalized)
+    return parsed,ok
 }
