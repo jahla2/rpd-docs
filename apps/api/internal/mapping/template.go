@@ -33,6 +33,7 @@ type TemplateConfig struct {
 var allowedTargets=map[string]bool{
     "supplier_name":true,
     "supplier_code":true,
+    "supplier_id":true,
     "invoice_number":true,
     "invoice_date":true,
     "due_date":true,
@@ -66,6 +67,7 @@ var allowedOperations=map[string]bool{
     "split":true,
     "combine":true,
     "compute":true,
+    "lookup":true,
 }
 
 func ValidateTemplateConfig(raw json.RawMessage)(TemplateConfig,error){
@@ -161,6 +163,25 @@ func ValidateTemplateConfig(raw json.RawMessage)(TemplateConfig,error){
                     return TemplateConfig{},fmt.Errorf(
                         "column %d operation %d compute operand %q duplicates primary source",
                         index,operationIndex,operand)
+                }
+                config.Columns[index].Operations[operationIndex].Config=normalizedConfig
+            }
+            if op=="lookup" {
+                if column.Target!="supplier_id" || column.Type!="identifier" {
+                    return TemplateConfig{},fmt.Errorf(
+                        "column %d operation %d supplier_master lookup requires supplier_id identifier target",
+                        index,operationIndex)
+                }
+                if len(column.Operations)!=1 {
+                    return TemplateConfig{},fmt.Errorf(
+                        "column %d lookup must be the only operation for its target",
+                        index)
+                }
+                normalizedConfig,err:=validateLookupConfig(operation.Config)
+                if err!=nil {
+                    return TemplateConfig{},fmt.Errorf(
+                        "column %d operation %d lookup config: %w",
+                        index,operationIndex,err)
                 }
                 config.Columns[index].Operations[operationIndex].Config=normalizedConfig
             }
@@ -342,5 +363,43 @@ func validateComputeConfig(config map[string]any)(map[string]any,error){
         "operator":operator,
         "operand":operand,
         "scale":scale,
+    },nil
+}
+
+
+func validateLookupConfig(config map[string]any)(map[string]any,error){
+    if config==nil { return nil,fmt.Errorf("config is required") }
+    for key:=range config {
+        switch key {
+        case "registry","source_field","on_missing":
+        default:
+            return nil,fmt.Errorf("unsupported key %q",key)
+        }
+    }
+
+    registry,ok:=config["registry"].(string)
+    if !ok || strings.ToLower(strings.TrimSpace(registry))!="supplier_master" {
+        return nil,fmt.Errorf("registry must be supplier_master")
+    }
+
+    sourceField,ok:=config["source_field"].(string)
+    if !ok || strings.ToLower(strings.TrimSpace(sourceField))!="supplier_name" {
+        return nil,fmt.Errorf("source_field must be supplier_name")
+    }
+
+    onMissing:="review"
+    if raw,exists:=config["on_missing"]; exists {
+        parsed,ok:=raw.(string)
+        if !ok { return nil,fmt.Errorf("on_missing must be review or empty") }
+        onMissing=strings.ToLower(strings.TrimSpace(parsed))
+    }
+    if onMissing!="review" && onMissing!="empty" {
+        return nil,fmt.Errorf("on_missing must be review or empty")
+    }
+
+    return map[string]any{
+        "registry":"supplier_master",
+        "source_field":"supplier_name",
+        "on_missing":onMissing,
     },nil
 }
