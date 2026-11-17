@@ -284,6 +284,10 @@ def _apply_operations(
                 current = None
                 continue
             current = format(result, "f")
+        elif name == "lookup":
+            # Tenant registries are resolved by the orchestrator. Never emit
+            # the raw lookup key as if it were the resolved identifier.
+            current = None
     return current, excluded
 
 
@@ -352,7 +356,7 @@ def extract_line_items(table_html: str | None, mapping_config: dict | None = Non
                     continue
                 strict_transform = any(
                     str(operation.get("operation", "")).strip().lower()
-                    in {"split", "combine", "compute"}
+                    in {"split", "combine", "compute", "lookup"}
                     for operation in operations
                 )
                 if strict_transform and transformed is None:
@@ -505,7 +509,7 @@ def _search_alias(
                 return None
             strict_transform = any(
                 str(operation.get("operation", "")).strip().lower()
-                in {"split", "combine", "compute"}
+                in {"split", "combine", "compute", "lookup"}
                 for operation in operations
             )
             if strict_transform and transformed is None:
