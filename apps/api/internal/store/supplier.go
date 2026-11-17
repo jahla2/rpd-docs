@@ -130,3 +130,49 @@ func (s *Store) ResolveSupplierKeys(ctx context.Context,tenantID,sourceName stri
     }
     return keys,rows.Err()
 }
+
+
+type SupplierLookupMatch struct {
+    ID string `json:"id"`
+    SupplierCode *string `json:"supplier_code,omitempty"`
+    SupplierName string `json:"supplier_name"`
+}
+
+func (s *Store) LookupSupplierExact(ctx context.Context,tenantID,source string)([]SupplierLookupMatch,error){
+    normalized:=reconciliation.NormalizeReference(source)
+    if normalized=="" { return []SupplierLookupMatch{},nil }
+
+    rows,err:=s.pool.Query(ctx,`
+      WITH candidates AS (
+        SELECT s.id,s.supplier_code,s.supplier_name,0 AS priority
+        FROM suppliers s
+        WHERE s.tenant_id=$1 AND s.status='ACTIVE' AND s.normalized_name=$2
+        UNION ALL
+        SELECT s.id,s.supplier_code,s.supplier_name,1 AS priority
+        FROM supplier_aliases a
+        JOIN suppliers s ON s.id=a.supplier_id AND s.tenant_id=a.tenant_id
+        WHERE a.tenant_id=$1 AND s.status='ACTIVE' AND a.normalized_alias=$2
+      ),
+      deduped AS (
+        SELECT id,supplier_code,supplier_name,MIN(priority) AS priority
+        FROM candidates
+        GROUP BY id,supplier_code,supplier_name
+      )
+      SELECT id::text,supplier_code,supplier_name
+      FROM deduped
+      ORDER BY priority,id
+      LIMIT 2
+    `,tenantID,normalized)
+    if err!=nil { return nil,err }
+    defer rows.Close()
+
+    out:=make([]SupplierLookupMatch,0,2)
+    for rows.Next(){
+        var item SupplierLookupMatch
+        if err:=rows.Scan(&item.ID,&item.SupplierCode,&item.SupplierName); err!=nil {
+            return nil,err
+        }
+        out=append(out,item)
+    }
+    return out,rows.Err()
+}
