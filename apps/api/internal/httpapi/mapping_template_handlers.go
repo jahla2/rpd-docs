@@ -122,6 +122,10 @@ func (s *Server) previewMappingTemplate(w http.ResponseWriter,r *http.Request){
         writeError(w,http.StatusConflict,"INVALID_MAPPING_TEMPLATE","stored mapping template is invalid"); return
     }
     preview:=mapping.PreviewTemplate(config,request.Headers,request.Samples)
+    if err:=s.resolveLookupPreview(
+        r.Context(),tenantFrom(r,s.defaultTenantID),config,request,&preview); err!=nil {
+        writeError(w,http.StatusInternalServerError,"DATABASE_FAILED","failed to resolve mapping lookup preview"); return
+    }
     writeJSON(w,http.StatusOK,map[string]any{
         "template_id":template.ID,
         "template_version":template.Version,
