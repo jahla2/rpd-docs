@@ -222,3 +222,67 @@ def test_combine_operation_missing_required_source_fails_closed():
     items, _ = extract_line_items(html, config)
     assert "description" not in items[0]
     assert items[0]["line_total"] == "100.00"
+
+
+
+def test_compute_operation_calculates_line_total_from_same_row():
+    html = """
+    <table>
+      <tr><th>Description</th><th>Quantity</th><th>Unit Price</th><th>Line Total</th></tr>
+      <tr><td>Office Supplies</td><td>2</td><td>500.00</td><td>1000.00</td></tr>
+    </table>
+    """
+    config = {
+        "columns": [
+            {
+                "source_aliases": ["Quantity"],
+                "target": "calculated_line_total",
+                "type": "decimal",
+                "operations": [
+                    {
+                        "operation": "compute",
+                        "config": {
+                            "operator": "multiply",
+                            "operand": "Unit Price",
+                            "scale": 2,
+                        },
+                    }
+                ],
+            }
+        ]
+    }
+    items, _ = extract_line_items(html, config)
+    assert items[0]["quantity"] == "2"
+    assert items[0]["unit_price"] == "500.00"
+    assert items[0]["line_total"] == "1000.00"
+    assert items[0]["calculated_line_total"] == "1000.00"
+
+
+def test_compute_operation_missing_operand_fails_closed():
+    html = """
+    <table>
+      <tr><th>Description</th><th>Quantity</th><th>Line Total</th></tr>
+      <tr><td>Office Supplies</td><td>2</td><td>1000.00</td></tr>
+    </table>
+    """
+    config = {
+        "columns": [
+            {
+                "source_aliases": ["Quantity"],
+                "target": "calculated_line_total",
+                "type": "decimal",
+                "operations": [
+                    {
+                        "operation": "compute",
+                        "config": {
+                            "operator": "multiply",
+                            "operand": "Unit Price",
+                            "scale": 2,
+                        },
+                    }
+                ],
+            }
+        ]
+    }
+    items, _ = extract_line_items(html, config)
+    assert "calculated_line_total" not in items[0]
