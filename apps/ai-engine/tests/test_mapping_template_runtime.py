@@ -286,3 +286,35 @@ def test_compute_operation_missing_operand_fails_closed():
     }
     items, _ = extract_line_items(html, config)
     assert "calculated_line_total" not in items[0]
+
+
+
+def test_lookup_operation_never_leaks_raw_value_from_ai_runtime():
+    html = """
+    <table>
+      <tr><th>Supplier Name</th><th>Line Total</th></tr>
+      <tr><td>ABC Trading</td><td>100.00</td></tr>
+    </table>
+    """
+    config = {
+        "columns": [
+            {
+                "source_aliases": ["Supplier Name"],
+                "target": "supplier_id",
+                "type": "identifier",
+                "operations": [
+                    {
+                        "operation": "lookup",
+                        "config": {
+                            "registry": "supplier_master",
+                            "source_field": "supplier_name",
+                            "on_missing": "review",
+                        },
+                    }
+                ],
+            }
+        ]
+    }
+    items, _ = extract_line_items(html, config)
+    assert "supplier_id" not in items[0]
+    assert items[0]["line_total"] == "100.00"
