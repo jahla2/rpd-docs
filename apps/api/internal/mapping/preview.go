@@ -267,6 +267,10 @@ func ApplyOperationsWithContext(value string, operations []Transform, context ma
                 return nil,false
             }
             current=result.FloatString(scale)
+        case "lookup":
+            // External registries are resolved by the tenant-scoped API/orchestrator,
+            // never by the pure mapping package.
+            return nil,false
         }
     }
 
