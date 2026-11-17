@@ -109,6 +109,7 @@ type CanonicalResponse struct {
     DocumentID string `json:"document_id"`
     DocumentType string `json:"document_type"`
     RequiresReview bool `json:"requires_review"`
+    LookupIssues []map[string]any `json:"lookup_issues,omitempty"`
 }
 
 type CanonicalEvidence struct {
@@ -518,6 +519,7 @@ func (w *Worker) HandlePreprocess(ctx context.Context, job JobMessage) error {
         return w.fail(ctx,job,fmt.Errorf("decode canonical result: %w",err))
     }
     if canonical.DocumentType=="" { canonical.DocumentType=classification.DocumentType }
+    lookupReviewRequired:=len(canonical.LookupIssues)>0
 
     if err:=w.setStatus(ctx,job,"VALIDATING",false,90); err!=nil { return w.fail(ctx,job,err) }
 
@@ -538,7 +540,7 @@ func (w *Worker) HandlePreprocess(ctx context.Context, job JobMessage) error {
                 if confidence>=w.AgentMinConfidence && !candidateValidation.RequiresReview {
                     canonicalBody=resolved
                     validationResult=candidateValidation
-                    canonical.RequiresReview=false
+                    canonical.RequiresReview=lookupReviewRequired
                     agentTrace=trace
                 } else {
                     agentTrace=trace
@@ -579,7 +581,7 @@ func (w *Worker) HandlePreprocess(ctx context.Context, job JobMessage) error {
         return w.fail(ctx,job,err)
     }
 
-    requiresReview:=canonical.RequiresReview || validationResult.RequiresReview
+    requiresReview:=canonical.RequiresReview || validationResult.RequiresReview || lookupReviewRequired
     if !requiresReview && validationResult.Valid {
         if err:=w.observeLayoutProfile(ctx,job,canonical.DocumentType,canonicalBody,layoutMatch); err!=nil {
             w.Logger.Warn("layout_profile_observation_failed","error",err,"document_id",job.DocumentID)
