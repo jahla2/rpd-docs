@@ -505,7 +505,7 @@ def _search_alias(
                 return None
             strict_transform = any(
                 str(operation.get("operation", "")).strip().lower()
-                in {"split", "combine"}
+                in {"split", "combine", "compute"}
                 for operation in operations
             )
             if strict_transform and transformed is None:
