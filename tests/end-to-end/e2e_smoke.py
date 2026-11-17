@@ -685,6 +685,69 @@ def main() -> None:
                 f"combine transform was not applied by runtime: {combine_result}"
             )
 
+        # Safe compute transform must use allowlisted arithmetic only and
+        # produce the guide's quantity × unit_price calculated line total.
+        compute_template = api(
+            "POST",
+            "/api/v1/mapping-templates",
+            json={
+                "name": "e2e-compute-runtime",
+                "document_type": "invoice",
+                "config": {
+                    "columns": [
+                        {
+                            "source_aliases": ["Quantity"],
+                            "target": "calculated_line_total",
+                            "type": "decimal",
+                            "required": False,
+                            "operations": [
+                                {
+                                    "operation": "compute",
+                                    "config": {
+                                        "operator": "multiply",
+                                        "operand": "Unit Price",
+                                        "scale": 2,
+                                    },
+                                }
+                            ],
+                        }
+                    ]
+                },
+            },
+        ).json()
+        compute_template_id = compute_template["id"]
+        activated_compute_template = api(
+            "POST",
+            f"/api/v1/mapping-templates/{compute_template_id}/activate",
+        ).json()
+        if activated_compute_template.get("status") != "ACTIVE":
+            raise AssertionError(
+                f"compute template activation failed: {activated_compute_template}"
+            )
+
+        compute_reprocess = api(
+            "POST",
+            f"/api/v1/documents/{document_id}/reprocess",
+            json={"mapping_template_id": compute_template_id},
+        ).json()
+        wait_for_job(compute_reprocess["job_id"])
+        compute_result = api(
+            "GET",
+            f"/api/v1/documents/{document_id}/result",
+        ).json()
+        compute_items = compute_result.get("line_items") or []
+        if not compute_items:
+            raise AssertionError(
+                f"compute runtime returned no line items: {compute_result}"
+            )
+        calculated_line_total = (
+            compute_items[0].get("calculated_line_total") or ""
+        ).strip()
+        if calculated_line_total != "1000.00":
+            raise AssertionError(
+                f"compute transform was not applied by runtime: {compute_result}"
+            )
+
         print(
             json.dumps(
                 {
