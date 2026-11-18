@@ -246,7 +246,6 @@ def run_one(source: Path, gt: dict, workdir: Path) -> dict:
             "POST",
             "/api/v1/documents",
             files={"file": (image_pdf.name, handle, "application/pdf")},
-            data={"document_type": "supplier_statement"},
         ).json()
 
     document_id = upload["document_id"]
