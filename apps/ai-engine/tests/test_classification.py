@@ -54,3 +54,55 @@ def test_explicit_hint_has_priority() -> None:
     assert result["document_type"] == "credit_note"
     assert result["confidence"] == 1.0
     assert result["method"] == "explicit"
+
+
+def test_supplier_statement_beats_detachable_payment_advice_footer() -> None:
+    result = classify_document(
+        document_id="doc-5",
+        pages=[
+            _page(
+                "STATEMENT",
+                "As At 01 July 2026",
+                "Date",
+                "Activity",
+                "Reference",
+                "Due Date",
+                "Invoice Amount",
+                "Payments",
+                "Balance NZD",
+                "BALANCE DUE NZD 513.35",
+                "PAYMENT ADVICE",
+                "To: Redwood Identity Services Ltd",
+                "Customer",
+                "Overdue",
+                "Current",
+                "Total NZD Due",
+            )
+        ],
+    )
+
+    assert result["document_type"] == "supplier_statement"
+    assert result["confidence"] >= 0.90
+    assert result["requires_review"] is False
+    assert any(
+        item["type"] == "payment_advice"
+        for item in result["alternatives"]
+    )
+
+
+def test_true_payment_advice_remains_payment_advice() -> None:
+    result = classify_document(
+        document_id="doc-6",
+        pages=[
+            _page(
+                "PAYMENT ADVICE",
+                "Payment Reference: PAY-2026-1001",
+                "Beneficiary: Example Supplier Ltd",
+                "Amount Remitted: NZD 513.35",
+            )
+        ],
+    )
+
+    assert result["document_type"] == "payment_advice"
+    assert result["confidence"] >= 0.90
+    assert result["requires_review"] is False
