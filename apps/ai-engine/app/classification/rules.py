@@ -112,6 +112,21 @@ _MAX_PAGES = 4
 _MAX_BLOCKS_PER_PAGE = 180
 _MAX_TEXT_CHARS = 12000
 
+# Supplier statements commonly include a detachable "PAYMENT ADVICE" footer.
+# Treat the statement's transaction-table structure as stronger evidence than
+# that footer heading so the whole document is classified by its primary type.
+_SUPPLIER_STATEMENT_TABLE_MARKERS: tuple[str, ...] = (
+    "invoice amount",
+    "due date",
+    "payments",
+)
+_SUPPLIER_STATEMENT_BALANCE_MARKERS: tuple[str, ...] = (
+    "balance due",
+    "current balance",
+    "closing balance",
+)
+_SUPPLIER_STATEMENT_STRUCTURE_BONUS = 12.0
+
 
 def _normalize(value: str) -> str:
     value = value.lower()
@@ -143,6 +158,12 @@ def _rank(text: str) -> list[tuple[str, float]]:
     ranked: list[tuple[str, float]] = []
     for document_type, rules in RULES.items():
         score = sum(weight for phrase, weight in rules if phrase in text)
+        if (
+            document_type == "supplier_statement"
+            and all(marker in text for marker in _SUPPLIER_STATEMENT_TABLE_MARKERS)
+            and any(marker in text for marker in _SUPPLIER_STATEMENT_BALANCE_MARKERS)
+        ):
+            score += _SUPPLIER_STATEMENT_STRUCTURE_BONUS
         ranked.append((document_type, score))
     ranked.sort(key=lambda item: (-item[1], item[0]))
     return ranked
