@@ -1,0 +1,1680 @@
+package pipeline
+
+import (
+    "bytes"
+    "context"
+    "encoding/json"
+    "fmt"
+    "io"
+    "log/slog"
+    "net/http"
+    "os"
+    "os/exec"
+    "path/filepath"
+    "strings"
+    "time"
+
+    "github.com/jackc/pgx/v5"
+    "github.com/jackc/pgx/v5/pgxpool"
+    "github.com/jahla2/rpd-docs/apps/orchestrator/internal/objectstore"
+    "github.com/jahla2/rpd-docs/apps/orchestrator/internal/validation"
+)
+
+type JobMessage struct {
+    SchemaVersion string `json:"schema_version"`
+    JobID string `json:"job_id"`
+    TenantID string `json:"tenant_id"`
+    DocumentID string `json:"document_id"`
+    RunID string `json:"run_id"`
+    Step string `json:"step"`
+    InputArtifact string `json:"input_artifact"`
+    Options map[string]any `json:"options,omitempty"`
+}
+
+type NativePrepareResult struct {
+    SchemaVersion string `json:"schema_version"`
+    PageCount int `json:"page_count"`
+    Pages []NativePage `json:"pages"`
+}
+
+type NativePage struct {
+    Page int `json:"page"`
+    ImageArtifact string `json:"image_artifact"`
+    QualityArtifact string `json:"quality_artifact"`
+    TextLayoutArtifact *string `json:"text_layout_artifact"`
+    SizeBytes int64 `json:"size_bytes"`
+    Mode string `json:"mode"`
+    SearchableText bool `json:"searchable_text"`
+    Blank bool `json:"blank"`
+}
+
+type OCRBlock struct {
+    BlockID string `json:"block_id"`
+    Text string `json:"text"`
+    BBox []float64 `json:"bbox"`
+    Confidence float64 `json:"confidence"`
+}
+
+type OCRResponse struct {
+    SchemaVersion string `json:"schema_version"`
+    DocumentID string `json:"document_id"`
+    Page int `json:"page"`
+    Engine string `json:"engine"`
+    Model *string `json:"model,omitempty"`
+    Blocks []OCRBlock `json:"blocks"`
+}
+
+type TableResponse struct {
+    SchemaVersion string `json:"schema_version"`
+    DocumentID string `json:"document_id"`
+    Page int `json:"page"`
+    Model string `json:"model"`
+    PredHTML *string `json:"pred_html"`
+    CellBBoxes any `json:"cell_bboxes"`
+    LogicPoints any `json:"logic_points"`
+    Elapsed *float64 `json:"elapsed"`
+}
+
+type ClassificationAlternative struct {
+    Type string `json:"type"`
+    Confidence float64 `json:"confidence"`
+}
+
+type ClassificationResponse struct {
+    SchemaVersion string `json:"schema_version"`
+    DocumentID string `json:"document_id"`
+    DocumentType string `json:"document_type"`
+    Confidence float64 `json:"confidence"`
+    Method string `json:"method"`
+    Model string `json:"model"`
+    ModelVersion string `json:"model_version"`
+    Alternatives []ClassificationAlternative `json:"alternatives"`
+    LatencyMS int64 `json:"latency_ms"`
+    RequiresReview bool `json:"requires_review"`
+}
+
+type LayoutMatchResponse struct {
+    SchemaVersion string `json:"schema_version"`
+    Fingerprint map[string]any `json:"fingerprint"`
+    FingerprintHash string `json:"fingerprint_hash"`
+    Matched bool `json:"matched"`
+    MatchedProfileID string `json:"matched_profile_id"`
+    MatchedProfileName string `json:"matched_profile_name"`
+    Score float64 `json:"score"`
+    Config map[string]any `json:"config"`
+}
+
+type CanonicalResponse struct {
+    SchemaVersion string `json:"schema_version"`
+    DocumentID string `json:"document_id"`
+    DocumentType string `json:"document_type"`
+    RequiresReview bool `json:"requires_review"`
+    LookupIssues []map[string]any `json:"lookup_issues,omitempty"`
+}
+
+type CanonicalEvidence struct {
+    Page int `json:"page"`
+    BlockIDs []string `json:"block_ids"`
+    BBox []float64 `json:"bbox,omitempty"`
+    BBoxNormalized []float64 `json:"bbox_normalized,omitempty"`
+    Method string `json:"method"`
+    Confidence float64 `json:"confidence"`
+}
+
+type CanonicalField struct {
+    Raw string `json:"raw"`
+    Value string `json:"value"`
+    DataType string `json:"data_type,omitempty"`
+    Evidence CanonicalEvidence `json:"evidence"`
+}
+
+type CanonicalInvoiceDocument struct {
+    SupplierName *CanonicalField `json:"supplier_name"`
+    SupplierCode *CanonicalField `json:"supplier_code"`
+    SupplierID *CanonicalField `json:"supplier_id"`
+    InvoiceNumber *CanonicalField `json:"invoice_number"`
+    InvoiceDate *CanonicalField `json:"invoice_date"`
+    DueDate *CanonicalField `json:"due_date"`
+    PONumber *CanonicalField `json:"po_number"`
+    Currency *CanonicalField `json:"currency"`
+    Subtotal *CanonicalField `json:"subtotal"`
+    Tax *CanonicalField `json:"tax"`
+    GrandTotal *CanonicalField `json:"grand_total"`
+    LineItems []map[string]any `json:"line_items"`
+}
+
+type CanonicalGenericDocument struct {
+    Fields map[string]*CanonicalField `json:"fields"`
+    Tables map[string][]map[string]any `json:"tables"`
+}
+
+type pageExtraction struct {
+    Page int `json:"page"`
+    ImagePath string `json:"image_path,omitempty"`
+    OCRBlocks []OCRBlock `json:"ocr_blocks"`
+    TableHTML *string `json:"table_html"`
+    TableCellBBoxes any `json:"table_cell_bboxes,omitempty"`
+    TableLogicPoints any `json:"table_logic_points,omitempty"`
+}
+
+type Worker struct {
+    DB *pgxpool.Pool
+    Logger *slog.Logger
+    StorageRoot string
+    NativeEnginePath string
+    AIEngineURL string
+    HTTP *http.Client
+    AgentFallbackEnabled bool
+    AgentMinConfidence float64
+    ObjectStore *objectstore.Client
+}
+
+func New(db *pgxpool.Pool, logger *slog.Logger, storageRoot,nativePath,aiURL string,agentEnabled bool,agentMinConfidence float64,obj *objectstore.Client) *Worker {
+    if agentMinConfidence<=0 || agentMinConfidence>1 { agentMinConfidence=0.90 }
+    return &Worker{
+        DB:db,Logger:logger,StorageRoot:storageRoot,NativeEnginePath:nativePath,AIEngineURL:aiURL,
+        HTTP:&http.Client{Timeout:5*time.Minute},
+        AgentFallbackEnabled:agentEnabled,AgentMinConfidence:agentMinConfidence,ObjectStore:obj,
+    }
+}
+
+func (w *Worker) HandlePreprocess(ctx context.Context, job JobMessage) error {
+    if job.SchemaVersion!="1.0" || job.JobID=="" || job.TenantID=="" || job.DocumentID=="" || job.RunID=="" || job.InputArtifact=="" {
+        return fmt.Errorf("invalid job contract")
+    }
+
+    completed,err:=w.beginStep(ctx,job)
+    if err!=nil { return err }
+    if completed {
+        w.Logger.Info("job_step_already_completed","job_id",job.JobID,"run_id",job.RunID,"step",job.Step)
+        return nil
+    }
+
+    if err:=w.setStatus(ctx,job,"PREPROCESSING",false,5); err!=nil { return w.fail(ctx,job,err) }
+
+    preprocessDir:=filepath.Join(w.StorageRoot,"tenants",job.TenantID,"processing",job.DocumentID,job.RunID,"preprocess")
+    if err:=os.MkdirAll(preprocessDir,0o750); err!=nil {
+        return w.fail(ctx,job,fmt.Errorf("create preprocess dir: %w",err))
+    }
+
+    inputArtifact:=job.InputArtifact
+    if _,statErr:=os.Stat(inputArtifact); statErr!=nil && w.ObjectStore!=nil {
+        sourceURI,_:=job.Options["source_uri"].(string)
+        if sourceURI=="" { return w.fail(ctx,job,fmt.Errorf("input artifact is unavailable locally and source_uri is missing")) }
+        extension:=filepath.Ext(sourceURI)
+        if extension=="" { extension=".bin" }
+        materialized:=filepath.Join(w.StorageRoot,"tenants",job.TenantID,"processing",job.DocumentID,job.RunID,"source","original"+extension)
+        if err:=w.ObjectStore.Materialize(ctx,sourceURI,materialized); err!=nil {
+            return w.fail(ctx,job,fmt.Errorf("materialize source artifact: %w",err))
+        }
+        inputArtifact=materialized
+    }
+
+    cmd:=exec.CommandContext(ctx,w.NativeEnginePath,"prepare",inputArtifact,preprocessDir)
+    out,err:=cmd.Output()
+    if err!=nil {
+        return w.fail(ctx,job,fmt.Errorf("native prepare: %w",err))
+    }
+
+    var native NativePrepareResult
+    if err:=json.Unmarshal(out,&native); err!=nil {
+        return w.fail(ctx,job,fmt.Errorf("decode native prepare result: %w",err))
+    }
+    if native.SchemaVersion!="2.0" || native.PageCount<1 || len(native.Pages)!=native.PageCount {
+        return w.fail(ctx,job,fmt.Errorf("invalid native prepare contract"))
+    }
+
+    _=w.emitEvent(ctx,job,"document.pages_discovered","PREPROCESSED",10,nil,&native.PageCount,map[string]any{
+        "page_count":native.PageCount,
+    })
+
+    for _,page:=range native.Pages {
+        if page.ImageArtifact=="" {
+            return w.fail(ctx,job,fmt.Errorf("page %d has no image artifact",page.Page))
+        }
+        if err:=w.addArtifact(ctx,job,"PREPROCESSED_PAGE",page.ImageArtifact,strPtr("image/png")); err!=nil {
+            return w.fail(ctx,job,err)
+        }
+        if page.QualityArtifact!="" {
+            if err:=w.addArtifact(ctx,job,"QUALITY_JSON",page.QualityArtifact,strPtr("application/json")); err!=nil {
+                return w.fail(ctx,job,err)
+            }
+        }
+        if page.TextLayoutArtifact!=nil && *page.TextLayoutArtifact!="" {
+            if err:=w.addArtifact(ctx,job,"PDF_TEXT_LAYOUT",*page.TextLayoutArtifact,strPtr("text/html")); err!=nil {
+                return w.fail(ctx,job,err)
+            }
+        }
+
+        route:="ocr"
+        if page.Blank { route="blank" } else if page.SearchableText && page.TextLayoutArtifact!=nil { route="embedded_text" }
+        if err:=w.upsertPage(ctx,job,page,route,"PREPROCESSED","",""); err!=nil {
+            return w.fail(ctx,job,err)
+        }
+    }
+
+    if err:=w.setStatus(ctx,job,"OCR_PROCESSING",false,15); err!=nil { return w.fail(ctx,job,err) }
+
+    extractions:=make([]pageExtraction,0,native.PageCount)
+    pageOCR:=make(map[int]OCRResponse,native.PageCount)
+
+    for index,page:=range native.Pages {
+        textStarted:=time.Now()
+        var ocrBody []byte
+        var ocr OCRResponse
+
+        if page.Blank {
+            ocr=OCRResponse{
+                SchemaVersion:"1.0",DocumentID:job.DocumentID,Page:page.Page,Engine:"blank",Blocks:[]OCRBlock{},
+            }
+            ocrBody,_=json.Marshal(ocr)
+        } else if page.SearchableText && page.TextLayoutArtifact!=nil {
+            ocrBody,err=w.postJSON(ctx,"/v1/pdftext",map[string]any{
+                "document_id":job.DocumentID,
+                "page":page.Page,
+                "layout_path":*page.TextLayoutArtifact,
+                "image_path":page.ImageArtifact,
+            })
+            if err!=nil { return w.fail(ctx,job,fmt.Errorf("page %d embedded text: %w",page.Page,err)) }
+            if err:=json.Unmarshal(ocrBody,&ocr); err!=nil {
+                return w.fail(ctx,job,fmt.Errorf("decode page %d embedded text: %w",page.Page,err))
+            }
+        } else {
+            ocrBody,err=w.postJSON(ctx,"/v1/ocr",map[string]any{
+                "document_id":job.DocumentID,
+                "page":page.Page,
+                "image_path":page.ImageArtifact,
+            })
+            if err!=nil { return w.fail(ctx,job,fmt.Errorf("page %d OCR: %w",page.Page,err)) }
+            if err:=json.Unmarshal(ocrBody,&ocr); err!=nil {
+                return w.fail(ctx,job,fmt.Errorf("decode page %d OCR: %w",page.Page,err))
+            }
+        }
+
+        if ocr.SchemaVersion!="1.0" {
+            return w.fail(ctx,job,fmt.Errorf("unsupported text schema version %q on page %d",ocr.SchemaVersion,page.Page))
+        }
+        if err:=w.recordOCRRun(ctx,job,ocr,time.Since(textStarted).Milliseconds()); err!=nil {
+            return w.fail(ctx,job,fmt.Errorf("persist OCR provenance for page %d: %w",page.Page,err))
+        }
+
+        ocrDir:=filepath.Join(w.StorageRoot,"tenants",job.TenantID,"processing",job.DocumentID,job.RunID,"ocr")
+        ocrPath,err:=writeArtifactFile(ocrDir,fmt.Sprintf("page-%03d.json",page.Page),ocrBody)
+        if err!=nil { return w.fail(ctx,job,err) }
+        if err:=w.addArtifact(ctx,job,"OCR_JSON",ocrPath,strPtr("application/json")); err!=nil { return w.fail(ctx,job,err) }
+
+        pageOCR[page.Page]=ocr
+        if err:=w.updatePageOutput(ctx,job,page.Page,"TEXT_COMPLETED",ocrPath,""); err!=nil {
+            return w.fail(ctx,job,err)
+        }
+
+        pageNumber:=page.Page
+        progress:=pageProgress(15,30,index+1,native.PageCount)
+        _=w.emitEvent(ctx,job,"page.text_completed","OCR_PROCESSING",progress,&pageNumber,&native.PageCount,map[string]any{
+            "engine":ocr.Engine,
+            "block_count":len(ocr.Blocks),
+            "route":func() string {
+                if page.Blank { return "blank" }
+                if page.SearchableText { return "embedded_text" }
+                return "ocr"
+            }(),
+        })
+    }
+
+    if err:=w.setStatus(ctx,job,"OCR_COMPLETED",false,45); err!=nil { return w.fail(ctx,job,err) }
+    if err:=w.setStatus(ctx,job,"CLASSIFYING",false,47); err!=nil { return w.fail(ctx,job,err) }
+
+    classificationPages:=make([]map[string]any,0,native.PageCount)
+    for _,page:=range native.Pages {
+        classificationPages=append(classificationPages,map[string]any{
+            "page":page.Page,
+            "ocr_blocks":pageOCR[page.Page].Blocks,
+        })
+    }
+    classificationPayload:=map[string]any{
+        "document_id":job.DocumentID,
+        "pages":classificationPages,
+    }
+    if hint,ok:=job.Options["document_type"].(string); ok && strings.TrimSpace(hint)!="" {
+        classificationPayload["document_type_hint"]=strings.TrimSpace(hint)
+        classificationPayload["hint_source"]="explicit"
+    }
+
+    classificationCtx,cancelClassification:=context.WithTimeout(ctx,3*time.Second)
+    classificationBody,err:=w.postJSON(classificationCtx,"/v1/classify",classificationPayload)
+    classificationTimedOut:=classificationCtx.Err()==context.DeadlineExceeded
+    cancelClassification()
+
+    var classification ClassificationResponse
+    if err!=nil {
+        if !classificationTimedOut {
+            return w.fail(ctx,job,fmt.Errorf("document classification: %w",err))
+        }
+        classification=ClassificationResponse{
+            SchemaVersion:"1.0",
+            DocumentID:job.DocumentID,
+            DocumentType:"unknown",
+            Confidence:0,
+            Method:"classification_timeout",
+            ModelVersion:"timeout-3s",
+            Alternatives:[]ClassificationAlternative{},
+            LatencyMS:3000,
+            RequiresReview:true,
+        }
+        classificationBody,_=json.Marshal(classification)
+        w.Logger.Warn("document_classification_timeout","document_id",job.DocumentID,"job_id",job.JobID)
+    } else if err:=json.Unmarshal(classificationBody,&classification); err!=nil {
+        return w.fail(ctx,job,fmt.Errorf("decode classification result: %w",err))
+    }
+    if classification.SchemaVersion!="1.0" || classification.DocumentType=="" {
+        return w.fail(ctx,job,fmt.Errorf("invalid classification contract"))
+    }
+
+    classificationDir:=filepath.Join(w.StorageRoot,"tenants",job.TenantID,"processing",job.DocumentID,job.RunID,"classification")
+    classificationPath,err:=writeArtifactFile(classificationDir,"classification.json",classificationBody)
+    if err!=nil { return w.fail(ctx,job,err) }
+    if err:=w.addArtifact(ctx,job,"CLASSIFICATION_JSON",classificationPath,strPtr("application/json")); err!=nil {
+        return w.fail(ctx,job,err)
+    }
+    if err:=w.persistClassification(ctx,job,classification); err!=nil {
+        return w.fail(ctx,job,fmt.Errorf("persist classification: %w",err))
+    }
+    if err:=w.setStatus(ctx,job,"CLASSIFIED",false,49); err!=nil { return w.fail(ctx,job,err) }
+    _=w.emitEvent(ctx,job,"document.classified","CLASSIFIED",49,nil,&native.PageCount,map[string]any{
+        "document_type":classification.DocumentType,
+        "confidence":classification.Confidence,
+        "method":classification.Method,
+        "latency_ms":classification.LatencyMS,
+        "requires_review":classification.RequiresReview,
+    })
+
+    if !supportsFinancialExtraction(classification.DocumentType) {
+        return w.finalizeUnsupportedDocument(ctx,job,native.PageCount,classification)
+    }
+
+    layoutProfiles,profileErr:=w.loadActiveLayoutProfiles(ctx,job.TenantID,classification.DocumentType)
+    if profileErr!=nil {
+        w.Logger.Warn("layout_profiles_unavailable","error",profileErr,"document_type",classification.DocumentType)
+        layoutProfiles=[]map[string]any{}
+    }
+    layoutPages:=make([]map[string]any,0,native.PageCount)
+    for _,page:=range native.Pages {
+        layoutPages=append(layoutPages,map[string]any{
+            "page":page.Page,
+            "image_path":page.ImageArtifact,
+            "ocr_blocks":pageOCR[page.Page].Blocks,
+        })
+    }
+    layoutMatch:=LayoutMatchResponse{
+        SchemaVersion:"1.0",
+        Fingerprint:map[string]any{},
+        Config:map[string]any{},
+    }
+    layoutBody,layoutErr:=w.postJSON(ctx,"/v1/layout/match",map[string]any{
+        "document_id":job.DocumentID,
+        "document_type":classification.DocumentType,
+        "pages":layoutPages,
+        "profiles":layoutProfiles,
+    })
+    if layoutErr!=nil {
+        w.Logger.Warn("layout_match_skipped","error",layoutErr,"document_id",job.DocumentID)
+    } else if err:=json.Unmarshal(layoutBody,&layoutMatch); err!=nil {
+        w.Logger.Warn("layout_match_decode_failed","error",err,"document_id",job.DocumentID)
+    } else {
+        layoutDir:=filepath.Join(w.StorageRoot,"tenants",job.TenantID,"processing",job.DocumentID,job.RunID,"layout")
+        layoutPath,writeErr:=writeArtifactFile(layoutDir,"layout-match.json",layoutBody)
+        if writeErr==nil {
+            _=w.addArtifact(ctx,job,"LAYOUT_MATCH_JSON",layoutPath,strPtr("application/json"))
+        }
+        _=w.emitEvent(ctx,job,"document.layout_matched","CLASSIFIED",49,nil,&native.PageCount,map[string]any{
+            "matched":layoutMatch.Matched,
+            "profile_id":layoutMatch.MatchedProfileID,
+            "profile_name":layoutMatch.MatchedProfileName,
+            "score":layoutMatch.Score,
+            "fingerprint_hash":layoutMatch.FingerprintHash,
+        })
+    }
+
+    if err:=w.setStatus(ctx,job,"TABLE_PROCESSING",false,50); err!=nil { return w.fail(ctx,job,err) }
+
+    for index,page:=range native.Pages {
+        ocr:=pageOCR[page.Page]
+        var table TableResponse
+
+        if !page.Blank && len(ocr.Blocks)>0 {
+            tableBody,tableErr:=w.postJSON(ctx,"/v1/tables",map[string]any{
+                "document_id":job.DocumentID,
+                "page":page.Page,
+                "image_path":page.ImageArtifact,
+                "ocr_blocks":ocr.Blocks,
+                "auto_crop":true,
+                "document_type":classification.DocumentType,
+                "layout_config":layoutMatch.Config,
+            })
+            if tableErr!=nil {
+                return w.fail(ctx,job,fmt.Errorf("page %d table recognition: %w",page.Page,tableErr))
+            }
+            if err:=json.Unmarshal(tableBody,&table); err!=nil {
+                return w.fail(ctx,job,fmt.Errorf("decode page %d table result: %w",page.Page,err))
+            }
+
+            tableDir:=filepath.Join(w.StorageRoot,"tenants",job.TenantID,"processing",job.DocumentID,job.RunID,"tables")
+            tablePath,err:=writeArtifactFile(tableDir,fmt.Sprintf("table-%03d.json",page.Page),tableBody)
+            if err!=nil { return w.fail(ctx,job,err) }
+            if err:=w.addArtifact(ctx,job,"TABLE_JSON",tablePath,strPtr("application/json")); err!=nil {
+                return w.fail(ctx,job,err)
+            }
+
+            if table.PredHTML!=nil && *table.PredHTML!="" {
+                htmlPath,htmlErr:=writeArtifactFile(tableDir,fmt.Sprintf("table-%03d.html",page.Page),[]byte(*table.PredHTML))
+                if htmlErr!=nil { return w.fail(ctx,job,htmlErr) }
+                if err:=w.addArtifact(ctx,job,"TABLE_HTML",htmlPath,strPtr("text/html")); err!=nil {
+                    return w.fail(ctx,job,err)
+                }
+            }
+            if err:=w.updatePageOutput(ctx,job,page.Page,"TABLES_COMPLETED","",tablePath); err!=nil {
+                return w.fail(ctx,job,err)
+            }
+        } else {
+            table=TableResponse{SchemaVersion:"1.0",DocumentID:job.DocumentID,Page:page.Page}
+            if err:=w.updatePageOutput(ctx,job,page.Page,"TABLES_SKIPPED","",""); err!=nil {
+                return w.fail(ctx,job,err)
+            }
+        }
+
+        extractions=append(extractions,pageExtraction{
+            Page:page.Page,
+            ImagePath:page.ImageArtifact,
+            OCRBlocks:ocr.Blocks,
+            TableHTML:table.PredHTML,
+            TableCellBBoxes:table.CellBBoxes,
+            TableLogicPoints:table.LogicPoints,
+        })
+
+        pageNumber:=page.Page
+        progress:=pageProgress(50,25,index+1,native.PageCount)
+        _=w.emitEvent(ctx,job,"page.table_completed","TABLE_PROCESSING",progress,&pageNumber,&native.PageCount,nil)
+    }
+
+    if err:=w.setStatus(ctx,job,"TABLES_COMPLETED",false,75); err!=nil { return w.fail(ctx,job,err) }
+    if err:=w.setStatus(ctx,job,"MAPPING",false,80); err!=nil { return w.fail(ctx,job,err) }
+
+    extractPayload:=map[string]any{
+        "document_id":job.DocumentID,
+        "document_type":classification.DocumentType,
+        "pages":extractions,
+        "layout_match":layoutMatch,
+    }
+    if mappingConfig,ok:=job.Options["mapping_config"]; ok {
+        extractPayload["mapping_config"]=mappingConfig
+    }
+    canonicalBody,err:=w.postJSON(ctx,"/v1/extract/financial-document",extractPayload)
+    if err!=nil { return w.fail(ctx,job,fmt.Errorf("%s extraction: %w",classification.DocumentType,err)) }
+
+    canonicalBody,err=w.applyLookupTransforms(ctx,job,canonicalBody)
+    if err!=nil { return w.fail(ctx,job,fmt.Errorf("apply lookup transforms: %w",err)) }
+
+    var canonical CanonicalResponse
+    if err:=json.Unmarshal(canonicalBody,&canonical); err!=nil {
+        return w.fail(ctx,job,fmt.Errorf("decode canonical result: %w",err))
+    }
+    if canonical.DocumentType=="" { canonical.DocumentType=classification.DocumentType }
+    lookupReviewRequired:=len(canonical.LookupIssues)>0
+
+    if err:=w.setStatus(ctx,job,"VALIDATING",false,90); err!=nil { return w.fail(ctx,job,err) }
+
+    validationResult,err:=validation.ValidateDocument(canonicalBody,canonical.DocumentType,"0.01")
+    if err!=nil { return w.fail(ctx,job,fmt.Errorf("validate canonical %s: %w",canonical.DocumentType,err)) }
+
+    var agentTrace []byte
+    if canonical.DocumentType=="invoice" && w.AgentFallbackEnabled && (canonical.RequiresReview || validationResult.RequiresReview) {
+        resolved,trace,agentErr:=w.tryAgentFallback(ctx,job,canonicalBody,validationResult,extractions)
+        if agentErr!=nil {
+            w.Logger.Warn("agent_fallback_skipped","error",agentErr,"document_id",job.DocumentID)
+        } else if len(resolved)>0 {
+            candidateValidation,validateErr:=validation.ValidateInvoice(resolved,"0.01")
+            if validateErr==nil {
+                var traceEnvelope map[string]any
+                _=json.Unmarshal(trace,&traceEnvelope)
+                confidence,_:=traceEnvelope["confidence"].(float64)
+                if confidence>=w.AgentMinConfidence && !candidateValidation.RequiresReview {
+                    canonicalBody=resolved
+                    validationResult=candidateValidation
+                    canonical.RequiresReview=lookupReviewRequired
+                    agentTrace=trace
+                } else {
+                    agentTrace=trace
+                }
+            }
+        }
+    } else if canonical.DocumentType=="supplier_statement" && w.AgentFallbackEnabled && (canonical.RequiresReview || validationResult.RequiresReview) {
+        resolved,trace,agentErr:=w.tryDocumentReview(ctx,job,canonical.DocumentType,canonicalBody,validationResult,extractions)
+        if agentErr!=nil {
+            w.Logger.Warn("document_review_agent_skipped","error",agentErr,"document_id",job.DocumentID)
+        } else {
+            agentTrace=trace
+            if len(resolved)>0 {
+                candidateValidation,validateErr:=validation.ValidateDocument(resolved,canonical.DocumentType,"0.01")
+                if validateErr==nil {
+                    var traceEnvelope map[string]any
+                    _=json.Unmarshal(trace,&traceEnvelope)
+                    confidence,_:=traceEnvelope["confidence"].(float64)
+
+                    currentFailures:=0
+                    for _,rule:=range validationResult.Rules {
+                        if rule.Status=="FAIL" && rule.Severity=="ERROR" { currentFailures++ }
+                    }
+                    candidateFailures:=0
+                    for _,rule:=range candidateValidation.Rules {
+                        if rule.Status=="FAIL" && rule.Severity=="ERROR" { candidateFailures++ }
+                    }
+
+                    var candidateCanonical CanonicalResponse
+                    canonicalErr:=json.Unmarshal(resolved,&candidateCanonical)
+                    if confidence>=w.AgentMinConfidence && canonicalErr==nil && candidateFailures<=currentFailures {
+                        canonicalBody=resolved
+                        validationResult=candidateValidation
+                        canonical.RequiresReview=candidateCanonical.RequiresReview || candidateValidation.RequiresReview || lookupReviewRequired
+                    }
+                }
+            }
+        }
+    }
+
+    validationBody,err:=json.MarshalIndent(validationResult,"","  ")
+    if err!=nil { return w.fail(ctx,job,err) }
+
+    versionID,versionNumber,err:=w.createDocumentVersion(ctx,job,canonical.DocumentType)
+    if err!=nil { return w.fail(ctx,job,err) }
+
+    if err:=w.persistCanonicalRecords(ctx,job,versionID,canonicalBody,validationResult); err!=nil {
+        return w.fail(ctx,job,fmt.Errorf("persist canonical records: %w",err))
+    }
+
+    finalDir:=filepath.Join(w.StorageRoot,"tenants",job.TenantID,"documents",job.DocumentID,versionID)
+    canonicalPath,err:=writeArtifactFile(finalDir,"canonical.json",canonicalBody)
+    if err!=nil { return w.fail(ctx,job,err) }
+    if err:=w.addVersionArtifact(ctx,job,versionID,"CANONICAL_JSON",canonicalPath,strPtr("application/json")); err!=nil {
+        return w.fail(ctx,job,err)
+    }
+
+    if len(agentTrace)>0 {
+        agentPath,agentErr:=writeArtifactFile(finalDir,"agent-trace.json",agentTrace)
+        if agentErr!=nil { return w.fail(ctx,job,agentErr) }
+        if err:=w.addVersionArtifact(ctx,job,versionID,"AGENT_TRACE_JSON",agentPath,strPtr("application/json")); err!=nil {
+            return w.fail(ctx,job,err)
+        }
+        _=w.persistAgentRun(ctx,job,versionID,agentTrace)
+    }
+
+    validationPath,err:=writeArtifactFile(finalDir,"validation.json",validationBody)
+    if err!=nil { return w.fail(ctx,job,err) }
+    if err:=w.addVersionArtifact(ctx,job,versionID,"VALIDATION_JSON",validationPath,strPtr("application/json")); err!=nil {
+        return w.fail(ctx,job,err)
+    }
+
+    requiresReview:=canonical.RequiresReview || validationResult.RequiresReview || lookupReviewRequired
+    if !requiresReview && validationResult.Valid {
+        if err:=w.observeLayoutProfile(ctx,job,canonical.DocumentType,canonicalBody,layoutMatch); err!=nil {
+            w.Logger.Warn("layout_profile_observation_failed","error",err,"document_id",job.DocumentID)
+        }
+    }
+
+    finalStatus:="READY_FOR_RECONCILIATION"
+    eventType:="document.completed"
+    if canonical.DocumentType!="invoice" {
+        finalStatus="COMPLETED"
+    }
+    if requiresReview {
+        finalStatus="REVIEW_REQUIRED"
+        eventType="review.required"
+        _=w.createDocumentReviewTask(ctx,job,versionID,"extraction or validation requires review")
+    }
+
+    if err:=w.setStatus(ctx,job,finalStatus,true,100); err!=nil { return err }
+    _=w.emitEvent(ctx,job,eventType,finalStatus,100,nil,&native.PageCount,map[string]any{
+        "document_version_id":versionID,
+        "validation_valid":validationResult.Valid,
+        "requires_review":requiresReview,
+    })
+
+    if err:=w.completeStep(ctx,job); err!=nil { return err }
+
+    w.Logger.Info("document_pipeline_completed",
+        "tenant_id",job.TenantID,"document_id",job.DocumentID,"job_id",job.JobID,
+        "document_version_id",versionID,"version_number",versionNumber,
+        "page_count",native.PageCount,"status",finalStatus,"canonical_artifact",canonicalPath)
+    return nil
+}
+
+func (w *Worker) beginStep(ctx context.Context,job JobMessage)(bool,error){
+    step:="PIPELINE"
+    key:=job.JobID+":"+step
+
+    tx,err:=w.DB.Begin(ctx)
+    if err!=nil { return false,err }
+    defer tx.Rollback(ctx)
+
+    var status string
+    var attempt int
+    err=tx.QueryRow(ctx,`
+      SELECT status,attempt_count
+      FROM job_steps
+      WHERE tenant_id=$1 AND job_id=$2 AND step_name=$3
+      FOR UPDATE
+    `,job.TenantID,job.JobID,step).Scan(&status,&attempt)
+
+    if err==pgx.ErrNoRows {
+        attempt=1
+        if _,err=tx.Exec(ctx,`
+          INSERT INTO job_steps
+            (tenant_id,job_id,run_id,step_name,status,attempt_count,started_at,idempotency_key,updated_at)
+          VALUES ($1,$2,$3,$4,'RUNNING',1,now(),$5,now())
+        `,job.TenantID,job.JobID,job.RunID,step,key); err!=nil {
+            return false,err
+        }
+    } else if err!=nil {
+        return false,err
+    } else if status=="COMPLETED" {
+        if err=tx.Commit(ctx); err!=nil { return false,err }
+        return true,nil
+    } else {
+        attempt++
+        if _,err=tx.Exec(ctx,`
+          UPDATE job_steps
+          SET run_id=$1,status='RUNNING',attempt_count=$2,started_at=now(),
+              completed_at=NULL,last_error=NULL,idempotency_key=$3,updated_at=now()
+          WHERE tenant_id=$4 AND job_id=$5 AND step_name=$6
+        `,job.RunID,attempt,key,job.TenantID,job.JobID,step); err!=nil {
+            return false,err
+        }
+    }
+
+    if _,err=tx.Exec(ctx,`
+      INSERT INTO job_attempts
+        (tenant_id,job_id,run_id,step_name,attempt_number,status,started_at)
+      VALUES ($1,$2,$3,$4,$5,'RUNNING',now())
+      ON CONFLICT (job_id,step_name,attempt_number) DO NOTHING
+    `,job.TenantID,job.JobID,job.RunID,step,attempt); err!=nil {
+        return false,err
+    }
+
+    if err=tx.Commit(ctx); err!=nil { return false,err }
+    return false,nil
+}
+
+func (w *Worker) completeStep(ctx context.Context,job JobMessage) error {
+    step:="PIPELINE"
+
+    tx,err:=w.DB.Begin(ctx)
+    if err!=nil { return err }
+    defer tx.Rollback(ctx)
+
+    if _,err=tx.Exec(ctx,`
+      UPDATE job_steps
+      SET status='COMPLETED',completed_at=now(),last_error=NULL,updated_at=now()
+      WHERE tenant_id=$1 AND job_id=$2 AND step_name=$3
+    `,job.TenantID,job.JobID,step); err!=nil {
+        return err
+    }
+    if _,err=tx.Exec(ctx,`
+      UPDATE job_attempts
+      SET status='COMPLETED',completed_at=now(),last_error=NULL
+      WHERE tenant_id=$1 AND job_id=$2 AND step_name=$3
+        AND attempt_number=(
+          SELECT MAX(attempt_number) FROM job_attempts
+          WHERE tenant_id=$1 AND job_id=$2 AND step_name=$3
+        )
+    `,job.TenantID,job.JobID,step); err!=nil {
+        return err
+    }
+    return tx.Commit(ctx)
+}
+
+func (w *Worker) failStep(ctx context.Context,job JobMessage,cause error) error {
+    message:=cause.Error()
+
+    tx,err:=w.DB.Begin(ctx)
+    if err!=nil { return err }
+    defer tx.Rollback(ctx)
+
+    if _,err=tx.Exec(ctx,`
+      UPDATE job_steps
+      SET status='FAILED',completed_at=now(),last_error=$1,updated_at=now()
+      WHERE tenant_id=$2 AND job_id=$3 AND status='RUNNING'
+    `,message,job.TenantID,job.JobID); err!=nil {
+        return err
+    }
+    if _,err=tx.Exec(ctx,`
+      UPDATE job_attempts
+      SET status='FAILED',completed_at=now(),last_error=$1
+      WHERE tenant_id=$2 AND job_id=$3 AND status='RUNNING'
+    `,message,job.TenantID,job.JobID); err!=nil {
+        return err
+    }
+    return tx.Commit(ctx)
+}
+
+func (w *Worker) startStage(ctx context.Context,job JobMessage,step string) error {
+    step=strings.TrimSpace(step)
+    if step=="" { return nil }
+    key:=job.JobID+":stage:"+step
+
+    tx,err:=w.DB.Begin(ctx)
+    if err!=nil { return err }
+    defer tx.Rollback(ctx)
+
+    var attempt int
+    err=tx.QueryRow(ctx,`
+      SELECT attempt_count
+      FROM job_steps
+      WHERE tenant_id=$1 AND job_id=$2 AND step_name=$3
+      FOR UPDATE
+    `,job.TenantID,job.JobID,step).Scan(&attempt)
+    if err==pgx.ErrNoRows {
+        attempt=1
+        if _,err=tx.Exec(ctx,`
+          INSERT INTO job_steps
+            (tenant_id,job_id,run_id,step_name,status,attempt_count,started_at,idempotency_key,updated_at)
+          VALUES ($1,$2,$3,$4,'RUNNING',1,now(),$5,now())
+        `,job.TenantID,job.JobID,job.RunID,step,key); err!=nil {
+            return err
+        }
+    } else if err!=nil {
+        return err
+    } else {
+        attempt++
+        if _,err=tx.Exec(ctx,`
+          UPDATE job_steps
+          SET run_id=$1,status='RUNNING',attempt_count=$2,started_at=now(),
+              completed_at=NULL,last_error=NULL,idempotency_key=$3,updated_at=now()
+          WHERE tenant_id=$4 AND job_id=$5 AND step_name=$6
+        `,job.RunID,attempt,key,job.TenantID,job.JobID,step); err!=nil {
+            return err
+        }
+    }
+
+    if _,err=tx.Exec(ctx,`
+      INSERT INTO job_attempts
+        (tenant_id,job_id,run_id,step_name,attempt_number,status,started_at)
+      VALUES ($1,$2,$3,$4,$5,'RUNNING',now())
+      ON CONFLICT (job_id,step_name,attempt_number) DO NOTHING
+    `,job.TenantID,job.JobID,job.RunID,step,attempt); err!=nil {
+        return err
+    }
+    return tx.Commit(ctx)
+}
+
+func (w *Worker) completeStage(ctx context.Context,job JobMessage,step string) error {
+    step=strings.TrimSpace(step)
+    if step=="" { return nil }
+
+    tx,err:=w.DB.Begin(ctx)
+    if err!=nil { return err }
+    defer tx.Rollback(ctx)
+
+    if _,err=tx.Exec(ctx,`
+      UPDATE job_steps
+      SET status='COMPLETED',completed_at=now(),last_error=NULL,updated_at=now()
+      WHERE tenant_id=$1 AND job_id=$2 AND step_name=$3 AND status='RUNNING'
+    `,job.TenantID,job.JobID,step); err!=nil {
+        return err
+    }
+    if _,err=tx.Exec(ctx,`
+      UPDATE job_attempts
+      SET status='COMPLETED',completed_at=now(),last_error=NULL
+      WHERE tenant_id=$1 AND job_id=$2 AND step_name=$3 AND status='RUNNING'
+    `,job.TenantID,job.JobID,step); err!=nil {
+        return err
+    }
+    return tx.Commit(ctx)
+}
+
+func (w *Worker) trackStageTransition(ctx context.Context,job JobMessage,status string,completed bool) error {
+    switch status {
+    case "PREPROCESSING":
+        return w.startStage(ctx,job,"PREPROCESS")
+    case "OCR_PROCESSING":
+        if err:=w.completeStage(ctx,job,"PREPROCESS"); err!=nil { return err }
+        return w.startStage(ctx,job,"OCR")
+    case "OCR_COMPLETED":
+        return w.completeStage(ctx,job,"OCR")
+    case "CLASSIFYING":
+        return w.startStage(ctx,job,"CLASSIFY")
+    case "CLASSIFIED":
+        return w.completeStage(ctx,job,"CLASSIFY")
+    case "TABLE_PROCESSING":
+        return w.startStage(ctx,job,"TABLE")
+    case "TABLES_COMPLETED":
+        return w.completeStage(ctx,job,"TABLE")
+    case "MAPPING":
+        return w.startStage(ctx,job,"MAPPING")
+    case "VALIDATING":
+        if err:=w.completeStage(ctx,job,"MAPPING"); err!=nil { return err }
+        return w.startStage(ctx,job,"VALIDATION")
+    default:
+        if completed {
+            if err:=w.completeStage(ctx,job,"VALIDATION"); err!=nil { return err }
+            if err:=w.startStage(ctx,job,"FINALIZE"); err!=nil { return err }
+            return w.completeStage(ctx,job,"FINALIZE")
+        }
+    }
+    return nil
+}
+
+func pageProgress(base,span,index,total int) int {
+    if total<=0 { return base }
+    progress:=base+(span*index/total)
+    if progress>100 { return 100 }
+    return progress
+}
+
+func (w *Worker) postJSON(ctx context.Context,path string,payload any) ([]byte,error) {
+    body,err:=json.Marshal(payload); if err!=nil { return nil,err }
+    req,err:=http.NewRequestWithContext(ctx,http.MethodPost,w.AIEngineURL+path,bytes.NewReader(body))
+    if err!=nil { return nil,err }
+    req.Header.Set("Content-Type","application/json")
+    resp,err:=w.HTTP.Do(req)
+    if err!=nil { return nil,err }
+    defer resp.Body.Close()
+
+    responseBody,readErr:=io.ReadAll(io.LimitReader(resp.Body,64<<20))
+    if readErr!=nil { return nil,readErr }
+    if resp.StatusCode<200 || resp.StatusCode>=300 {
+        return nil,fmt.Errorf("HTTP %d: %s",resp.StatusCode,string(responseBody))
+    }
+    return responseBody,nil
+}
+
+func writeArtifactFile(dir,name string,data []byte)(string,error){
+    if err:=os.MkdirAll(dir,0o750); err!=nil { return "",err }
+    path:=filepath.Join(dir,name)
+    if err:=os.WriteFile(path,data,0o640); err!=nil { return "",err }
+    return filepath.Abs(path)
+}
+
+func (w *Worker) persistClassification(ctx context.Context,job JobMessage,result ClassificationResponse) error {
+    alternatives,err:=json.Marshal(result.Alternatives)
+    if err!=nil { return err }
+    _,err=w.DB.Exec(ctx,`
+      INSERT INTO document_classifications
+        (tenant_id,document_id,job_id,run_id,document_type,confidence,method,model,model_version,
+         alternatives_json,latency_ms,requires_review)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,NULLIF($8,''),NULLIF($9,''),$10::jsonb,$11,$12)
+      ON CONFLICT (job_id)
+      DO UPDATE SET
+        document_type=EXCLUDED.document_type,
+        confidence=EXCLUDED.confidence,
+        method=EXCLUDED.method,
+        model=EXCLUDED.model,
+        model_version=EXCLUDED.model_version,
+        alternatives_json=EXCLUDED.alternatives_json,
+        latency_ms=EXCLUDED.latency_ms,
+        requires_review=EXCLUDED.requires_review,
+        created_at=now()
+    `,job.TenantID,job.DocumentID,job.JobID,job.RunID,result.DocumentType,result.Confidence,result.Method,
+      result.Model,result.ModelVersion,string(alternatives),result.LatencyMS,result.RequiresReview)
+    return err
+}
+
+func supportsFinancialExtraction(documentType string) bool {
+    switch strings.TrimSpace(strings.ToLower(documentType)) {
+    case "invoice","supplier_statement","bank_statement":
+        return true
+    default:
+        return false
+    }
+}
+
+func (w *Worker) finalizeUnsupportedDocument(
+    ctx context.Context,
+    job JobMessage,
+    pageCount int,
+    classification ClassificationResponse,
+) error {
+    canonicalBody,err:=json.MarshalIndent(map[string]any{
+        "schema_version":"1.0",
+        "document_id":job.DocumentID,
+        "document_type":classification.DocumentType,
+        "classification_confidence":classification.Confidence,
+        "classification_method":classification.Method,
+        "requires_review":true,
+        "review_reason":"type-specific extractor is not implemented",
+    },"","  ")
+    if err!=nil { return w.fail(ctx,job,err) }
+
+    validationResult:=validation.Result{
+        SchemaVersion:"1.0",
+        Valid:false,
+        RequiresReview:true,
+        Rules:[]validation.RuleResult{{
+            Code:"TYPE_SPECIFIC_EXTRACTOR_REQUIRED",
+            Status:"WARN",
+            Severity:"WARNING",
+            Message:fmt.Sprintf("document type %s requires a type-specific extractor",classification.DocumentType),
+            Evidence:map[string]any{
+                "document_type":classification.DocumentType,
+                "classification_confidence":classification.Confidence,
+                "classification_method":classification.Method,
+            },
+        }},
+    }
+    validationBody,err:=json.MarshalIndent(validationResult,"","  ")
+    if err!=nil { return w.fail(ctx,job,err) }
+
+    versionID,versionNumber,err:=w.createDocumentVersion(ctx,job,classification.DocumentType)
+    if err!=nil { return w.fail(ctx,job,err) }
+    if err:=w.persistCanonicalRecords(ctx,job,versionID,canonicalBody,validationResult); err!=nil {
+        return w.fail(ctx,job,fmt.Errorf("persist classified review document: %w",err))
+    }
+
+    finalDir:=filepath.Join(w.StorageRoot,"tenants",job.TenantID,"documents",job.DocumentID,versionID)
+    canonicalPath,err:=writeArtifactFile(finalDir,"canonical.json",canonicalBody)
+    if err!=nil { return w.fail(ctx,job,err) }
+    if err:=w.addVersionArtifact(ctx,job,versionID,"CANONICAL_JSON",canonicalPath,strPtr("application/json")); err!=nil {
+        return w.fail(ctx,job,err)
+    }
+    validationPath,err:=writeArtifactFile(finalDir,"validation.json",validationBody)
+    if err!=nil { return w.fail(ctx,job,err) }
+    if err:=w.addVersionArtifact(ctx,job,versionID,"VALIDATION_JSON",validationPath,strPtr("application/json")); err!=nil {
+        return w.fail(ctx,job,err)
+    }
+
+    reason:=fmt.Sprintf("document classified as %s; type-specific extractor is not implemented",classification.DocumentType)
+    if err:=w.createDocumentReviewTask(ctx,job,versionID,reason); err!=nil {
+        return w.fail(ctx,job,err)
+    }
+    if err:=w.setStatus(ctx,job,"REVIEW_REQUIRED",true,100); err!=nil { return err }
+    _=w.emitEvent(ctx,job,"review.required","REVIEW_REQUIRED",100,nil,&pageCount,map[string]any{
+        "document_version_id":versionID,
+        "document_type":classification.DocumentType,
+        "classification_confidence":classification.Confidence,
+        "reason":"type-specific extractor is not implemented",
+    })
+    if err:=w.completeStep(ctx,job); err!=nil { return err }
+
+    w.Logger.Info("document_classified_for_review",
+        "tenant_id",job.TenantID,"document_id",job.DocumentID,"job_id",job.JobID,
+        "document_version_id",versionID,"version_number",versionNumber,
+        "document_type",classification.DocumentType,"classification_confidence",classification.Confidence)
+    return nil
+}
+
+func (w *Worker) recordOCRRun(ctx context.Context,job JobMessage,ocr OCRResponse,latencyMs int64) error {
+    engine:=strings.TrimSpace(ocr.Engine)
+    if engine=="" { engine="unknown" }
+    var model any
+    if ocr.Model!=nil && strings.TrimSpace(*ocr.Model)!="" { model=strings.TrimSpace(*ocr.Model) }
+
+    _,err:=w.DB.Exec(ctx,`
+      INSERT INTO ocr_runs
+        (tenant_id,document_id,job_id,run_id,page_number,engine,model,block_count,latency_ms,status,completed_at)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'COMPLETED',now())
+      ON CONFLICT (job_id,page_number)
+      DO UPDATE SET
+        engine=EXCLUDED.engine,
+        model=EXCLUDED.model,
+        block_count=EXCLUDED.block_count,
+        latency_ms=EXCLUDED.latency_ms,
+        status='COMPLETED',
+        completed_at=now()
+    `,job.TenantID,job.DocumentID,job.JobID,job.RunID,ocr.Page,engine,model,len(ocr.Blocks),latencyMs)
+    return err
+}
+
+func (w *Worker) persistCanonicalRecords(
+    ctx context.Context,
+    job JobMessage,
+    versionID string,
+    canonicalBody []byte,
+    validationResult validation.Result,
+) error {
+    var generic CanonicalGenericDocument
+    if err:=json.Unmarshal(canonicalBody,&generic); err!=nil { return err }
+
+    var invoice CanonicalInvoiceDocument
+    genericShape:=len(generic.Fields)>0 || len(generic.Tables)>0
+    if !genericShape {
+        if err:=json.Unmarshal(canonicalBody,&invoice); err!=nil { return err }
+    }
+
+    tx,err:=w.DB.Begin(ctx)
+    if err!=nil { return err }
+    defer tx.Rollback(ctx)
+
+    if _,err=tx.Exec(ctx,`
+      DELETE FROM extracted_fields
+      WHERE tenant_id=$1 AND document_version_id=$2
+    `,job.TenantID,versionID); err!=nil {
+        return err
+    }
+    if _,err=tx.Exec(ctx,`
+      DELETE FROM document_line_items
+      WHERE tenant_id=$1 AND document_version_id=$2
+    `,job.TenantID,versionID); err!=nil {
+        return err
+    }
+    if _,err=tx.Exec(ctx,`
+      DELETE FROM validation_results
+      WHERE tenant_id=$1 AND document_version_id=$2
+    `,job.TenantID,versionID); err!=nil {
+        return err
+    }
+
+    type persistedField struct {
+        Name string
+        Type string
+        Value *CanonicalField
+    }
+    fields:=make([]persistedField,0)
+
+    if genericShape {
+        for name,value:=range generic.Fields {
+            dataType:="string"
+            if value!=nil && strings.TrimSpace(value.DataType)!="" {
+                dataType=strings.TrimSpace(value.DataType)
+            }
+            fields=append(fields,persistedField{Name:name,Type:dataType,Value:value})
+        }
+    } else {
+        fields=[]persistedField{
+            {"supplier_name","string",invoice.SupplierName},
+            {"supplier_code","identifier",invoice.SupplierCode},
+            {"supplier_id","identifier",invoice.SupplierID},
+            {"invoice_number","identifier",invoice.InvoiceNumber},
+            {"invoice_date","date",invoice.InvoiceDate},
+            {"due_date","date",invoice.DueDate},
+            {"po_number","identifier",invoice.PONumber},
+            {"currency","currency",invoice.Currency},
+            {"subtotal","decimal",invoice.Subtotal},
+            {"tax","decimal",invoice.Tax},
+            {"grand_total","decimal",invoice.GrandTotal},
+        }
+    }
+
+    for _,entry:=range fields {
+        if entry.Value==nil || strings.TrimSpace(entry.Value.Value)=="" { continue }
+        sourceMethod:=strings.TrimSpace(entry.Value.Evidence.Method)
+        if sourceMethod=="" { sourceMethod="deterministic_extraction" }
+        requiresReview:=entry.Value.Evidence.Confidence>0 && entry.Value.Evidence.Confidence<0.70
+
+        var confidence any
+        if entry.Value.Evidence.Confidence>0 { confidence=entry.Value.Evidence.Confidence }
+        var page any
+        if entry.Value.Evidence.Page>0 { page=entry.Value.Evidence.Page }
+
+        bboxJSON:=""
+        if len(entry.Value.Evidence.BBox)>0 {
+            encoded,_:=json.Marshal(entry.Value.Evidence.BBox)
+            bboxJSON=string(encoded)
+        }
+        evidenceJSON,_:=json.Marshal(map[string]any{
+            "block_ids":entry.Value.Evidence.BlockIDs,
+            "bbox":entry.Value.Evidence.BBox,
+            "bbox_normalized":entry.Value.Evidence.BBoxNormalized,
+            "method":sourceMethod,
+        })
+
+        if _,err=tx.Exec(ctx,`
+          INSERT INTO extracted_fields
+            (tenant_id,document_version_id,field_name,raw_value,normalized_value,data_type,
+             confidence,page_number,bbox_json,evidence_json,source_method,requires_review)
+          VALUES ($1,$2,$3,NULLIF($4,''),$5,$6,$7,$8,NULLIF($9,'')::jsonb,$10::jsonb,$11,$12)
+        `,job.TenantID,versionID,entry.Name,entry.Value.Raw,entry.Value.Value,entry.Type,
+          confidence,page,bboxJSON,string(evidenceJSON),sourceMethod,requiresReview); err!=nil {
+            return err
+        }
+    }
+
+    rowNumber:=0
+    if genericShape {
+        for tableName,rows:=range generic.Tables {
+            for _,row:=range rows {
+                rowNumber++
+                item:=make(map[string]any,len(row)+1)
+                item["_table"]=tableName
+                for key,value:=range row { item[key]=value }
+                encoded,marshalErr:=json.Marshal(item)
+                if marshalErr!=nil { return marshalErr }
+                if _,err=tx.Exec(ctx,`
+                  INSERT INTO document_line_items
+                    (tenant_id,document_version_id,row_number,data_json,requires_review)
+                  VALUES ($1,$2,$3,$4::jsonb,false)
+                `,job.TenantID,versionID,rowNumber,string(encoded)); err!=nil {
+                    return err
+                }
+            }
+        }
+    } else {
+        for index,item:=range invoice.LineItems {
+            encoded,marshalErr:=json.Marshal(item)
+            if marshalErr!=nil { return marshalErr }
+            if _,err=tx.Exec(ctx,`
+              INSERT INTO document_line_items
+                (tenant_id,document_version_id,row_number,data_json,requires_review)
+              VALUES ($1,$2,$3,$4::jsonb,false)
+            `,job.TenantID,versionID,index+1,string(encoded)); err!=nil {
+                return err
+            }
+        }
+    }
+
+    for _,rule:=range validationResult.Rules {
+        evidence,_:=json.Marshal(rule.Evidence)
+        if _,err=tx.Exec(ctx,`
+          INSERT INTO validation_results
+            (tenant_id,document_version_id,rule_code,status,severity,message,evidence_json)
+          VALUES ($1,$2,$3,$4,$5,NULLIF($6,''),$7::jsonb)
+        `,job.TenantID,versionID,rule.Code,rule.Status,rule.Severity,rule.Message,string(evidence)); err!=nil {
+            return err
+        }
+    }
+
+    return tx.Commit(ctx)
+}
+
+func (w *Worker) loadActiveLayoutProfiles(
+    ctx context.Context,
+    tenantID,documentType string,
+)([]map[string]any,error){
+    rows,err:=w.DB.Query(ctx,`
+      SELECT id::text,name,supplier_key,version,fingerprint_json::text,config_json::text,observation_count
+      FROM layout_profiles
+      WHERE tenant_id=$1 AND document_type=$2 AND status='ACTIVE'
+      ORDER BY last_seen_at DESC
+      LIMIT 64
+    `,tenantID,documentType)
+    if err!=nil { return nil,err }
+    defer rows.Close()
+
+    profiles:=make([]map[string]any,0)
+    for rows.Next(){
+        var id,name,supplierKey,fingerprintText,configText string
+        var version,observations int
+        if err:=rows.Scan(&id,&name,&supplierKey,&version,&fingerprintText,&configText,&observations); err!=nil {
+            return nil,err
+        }
+        fingerprint:=map[string]any{}
+        config:=map[string]any{}
+        if err:=json.Unmarshal([]byte(fingerprintText),&fingerprint); err!=nil { return nil,err }
+        if err:=json.Unmarshal([]byte(configText),&config); err!=nil { return nil,err }
+        profiles=append(profiles,map[string]any{
+            "id":id,
+            "name":name,
+            "supplier_key":supplierKey,
+            "version":version,
+            "fingerprint":fingerprint,
+            "config":config,
+            "observation_count":observations,
+        })
+    }
+    return profiles,rows.Err()
+}
+
+func normalizeLayoutKey(value string) string {
+    value=strings.ToLower(strings.TrimSpace(value))
+    parts:=strings.FieldsFunc(value,func(r rune) bool {
+        return !((r>='a' && r<='z') || (r>='0' && r<='9'))
+    })
+    return strings.Join(parts," ")
+}
+
+func layoutFieldType(name string) string {
+    switch name {
+    case "invoice_date","due_date","statement_date","period_start","period_end":
+        return "date"
+    case "subtotal","tax","grand_total","opening_balance","closing_balance":
+        return "decimal"
+    case "currency":
+        return "currency"
+    case "invoice_number","po_number","account_number":
+        return "identifier"
+    default:
+        return "string"
+    }
+}
+
+func canonicalLayoutConfig(canonicalBody []byte)(string,map[string]any,error){
+    var root map[string]any
+    if err:=json.Unmarshal(canonicalBody,&root); err!=nil {
+        return "",nil,err
+    }
+
+    fields:=map[string]any{}
+    if generic,ok:=root["fields"].(map[string]any); ok {
+        for name,value:=range generic { fields[name]=value }
+    } else {
+        for _,name:=range []string{
+            "supplier_name","supplier_code","invoice_number","invoice_date","due_date","po_number",
+            "currency","subtotal","tax","grand_total",
+        } {
+            if value,ok:=root[name]; ok && value!=nil { fields[name]=value }
+        }
+    }
+
+    supplierKey:=""
+    for _,name:=range []string{"supplier_name","institution_name","account_name"} {
+        field,ok:=fields[name].(map[string]any)
+        if !ok { continue }
+        if value,ok:=field["value"].(string); ok && strings.TrimSpace(value)!="" {
+            supplierKey=normalizeLayoutKey(value)
+            break
+        }
+    }
+
+    regions:=map[string]any{}
+    for name,rawField:=range fields {
+        field,ok:=rawField.(map[string]any)
+        if !ok { continue }
+        evidence,ok:=field["evidence"].(map[string]any)
+        if !ok { continue }
+        bbox,ok:=evidence["bbox_normalized"].([]any)
+        if !ok || len(bbox)!=4 { continue }
+
+        dataType:=layoutFieldType(name)
+        if value,ok:=field["data_type"].(string); ok && strings.TrimSpace(value)!="" {
+            dataType=strings.TrimSpace(value)
+        }
+        page:=1
+        if value,ok:=evidence["page"].(float64); ok && value>0 { page=int(value) }
+
+        raw,_:=field["raw"].(string)
+        value,_:=field["value"].(string)
+        rawPrefix:=""
+        if raw!="" && value!="" {
+            if index:=strings.Index(raw,value); index>0 {
+                rawPrefix=strings.TrimSpace(strings.Trim(raw[:index]," :#-\t"))
+            }
+        }
+        regions[name]=map[string]any{
+            "page":page,
+            "bbox_normalized":bbox,
+            "data_type":dataType,
+            "raw_prefix":rawPrefix,
+        }
+    }
+
+    return supplierKey,map[string]any{
+        "field_regions":regions,
+    },nil
+}
+
+func (w *Worker) observeLayoutProfile(
+    ctx context.Context,
+    job JobMessage,
+    documentType string,
+    canonicalBody []byte,
+    match LayoutMatchResponse,
+) error {
+    if match.Matched && strings.TrimSpace(match.MatchedProfileID)!="" {
+        _,err:=w.DB.Exec(ctx,`
+          UPDATE layout_profiles
+          SET observation_count=observation_count+1,last_seen_at=now(),updated_at=now()
+          WHERE tenant_id=$1 AND id=$2
+        `,job.TenantID,match.MatchedProfileID)
+        return err
+    }
+
+    hash:=strings.TrimSpace(match.FingerprintHash)
+    if hash=="" || len(match.Fingerprint)==0 { return nil }
+
+    supplierKey,config,err:=canonicalLayoutConfig(canonicalBody)
+    if err!=nil { return err }
+    fingerprintJSON,err:=json.Marshal(match.Fingerprint)
+    if err!=nil { return err }
+    configJSON,err:=json.Marshal(config)
+    if err!=nil { return err }
+
+    suffix:=hash
+    if len(suffix)>10 { suffix=suffix[:10] }
+    nameBase:=supplierKey
+    if nameBase=="" { nameBase=documentType }
+    profileName:=fmt.Sprintf("%s %s",nameBase,suffix)
+
+    _,err=w.DB.Exec(ctx,`
+      INSERT INTO layout_profiles
+        (tenant_id,document_type,supplier_key,name,version,status,fingerprint_hash,
+         fingerprint_json,config_json,observation_count,source)
+      VALUES ($1,$2,$3,$4,1,'CANDIDATE',$5,$6::jsonb,$7::jsonb,1,'AUTO_VALIDATED')
+      ON CONFLICT (tenant_id,document_type,fingerprint_hash)
+      DO UPDATE SET
+        supplier_key=CASE
+          WHEN EXCLUDED.supplier_key<>'' THEN EXCLUDED.supplier_key
+          ELSE layout_profiles.supplier_key
+        END,
+        config_json=CASE
+          WHEN EXCLUDED.config_json<>'{}'::jsonb THEN EXCLUDED.config_json
+          ELSE layout_profiles.config_json
+        END,
+        observation_count=layout_profiles.observation_count+1,
+        status=CASE
+          WHEN layout_profiles.status='ARCHIVED' THEN 'ARCHIVED'
+          WHEN layout_profiles.observation_count+1>=2 THEN 'ACTIVE'
+          ELSE layout_profiles.status
+        END,
+        last_seen_at=now(),
+        updated_at=now()
+    `,job.TenantID,documentType,supplierKey,profileName,hash,string(fingerprintJSON),string(configJSON))
+    return err
+}
+
+func (w *Worker) createDocumentVersion(ctx context.Context,job JobMessage,documentType string)(string,int,error){
+    var id string
+    var version int
+    var mappingTemplateID any
+    var mappingTemplateVersion any
+    if raw,ok:=job.Options["mapping_template_id"].(string); ok && raw!="" {
+        mappingTemplateID=raw
+    }
+    switch value:=job.Options["mapping_template_version"].(type) {
+    case float64:
+        mappingTemplateVersion=int(value)
+    case int:
+        mappingTemplateVersion=value
+    }
+
+    tx,err:=w.DB.Begin(ctx)
+    if err!=nil { return "",0,err }
+    defer tx.Rollback(ctx)
+
+    if _,err=tx.Exec(ctx,`SELECT pg_advisory_xact_lock(hashtext($1))`,job.DocumentID); err!=nil {
+        return "",0,err
+    }
+
+    err=tx.QueryRow(ctx,`
+      INSERT INTO document_versions
+        (tenant_id,document_id,version_number,pipeline_version,mapping_template_id,mapping_template_version,source_run_id)
+      SELECT $1,$2,COALESCE(MAX(version_number),0)+1,'mvp-0.5',$3,$4,$5
+      FROM document_versions
+      WHERE tenant_id=$1 AND document_id=$2
+      ON CONFLICT (document_id,source_run_id) WHERE source_run_id IS NOT NULL
+      DO UPDATE SET pipeline_version=EXCLUDED.pipeline_version
+      RETURNING id::text,version_number
+    `,job.TenantID,job.DocumentID,mappingTemplateID,mappingTemplateVersion,job.RunID).Scan(&id,&version)
+    if err!=nil { return "",0,err }
+
+    if _,err=tx.Exec(ctx,`
+      UPDATE documents SET document_type=$1,updated_at=now()
+      WHERE id=$2 AND tenant_id=$3
+    `,documentType,job.DocumentID,job.TenantID); err!=nil {
+        return "",0,err
+    }
+    if err=tx.Commit(ctx); err!=nil { return "",0,err }
+    return id,version,nil
+}
+
+func (w *Worker) setStatus(ctx context.Context,job JobMessage,status string,completed bool,progress int) error {
+    if completed {
+        _,err:=w.DB.Exec(ctx,`
+          UPDATE processing_jobs
+          SET status=$1,started_at=COALESCE(started_at,now()),completed_at=now()
+          WHERE id=$2 AND tenant_id=$3
+        `,status,job.JobID,job.TenantID)
+        if err!=nil { return err }
+    } else {
+        _,err:=w.DB.Exec(ctx,`
+          UPDATE processing_jobs
+          SET status=$1,started_at=COALESCE(started_at,now())
+          WHERE id=$2 AND tenant_id=$3
+        `,status,job.JobID,job.TenantID)
+        if err!=nil { return err }
+    }
+
+    if _,err:=w.DB.Exec(ctx,`
+      UPDATE documents SET status=$1,updated_at=now()
+      WHERE id=$2 AND tenant_id=$3
+    `,status,job.DocumentID,job.TenantID); err!=nil { return err }
+
+    if err:=w.trackStageTransition(ctx,job,status,completed); err!=nil { return err }
+    return w.emitEvent(ctx,job,"status.changed",status,progress,nil,nil,nil)
+}
+
+func (w *Worker) MarkRetrying(ctx context.Context,job JobMessage,cause error) error {
+    message:=""
+    if cause!=nil { message=cause.Error() }
+    if _,err:=w.DB.Exec(ctx,`
+      UPDATE processing_jobs
+      SET status='RETRYING',failed_at=NULL,completed_at=NULL
+      WHERE id=$1 AND tenant_id=$2
+    `,job.JobID,job.TenantID); err!=nil {
+        return err
+    }
+    if _,err:=w.DB.Exec(ctx,`
+      UPDATE documents
+      SET status='RETRYING',updated_at=now()
+      WHERE id=$1 AND tenant_id=$2
+    `,job.DocumentID,job.TenantID); err!=nil {
+        return err
+    }
+    return w.emitEvent(ctx,job,"document.retrying","RETRYING",0,nil,nil,map[string]any{
+        "error":message,
+    })
+}
+
+func (w *Worker) fail(ctx context.Context,job JobMessage,cause error) error {
+    _=w.failStep(ctx,job,cause)
+    _,_=w.DB.Exec(ctx,`
+      UPDATE processing_jobs SET status='FAILED',failed_at=now()
+      WHERE id=$1 AND tenant_id=$2
+    `,job.JobID,job.TenantID)
+    _,_=w.DB.Exec(ctx,`
+      UPDATE documents SET status='FAILED',updated_at=now()
+      WHERE id=$1 AND tenant_id=$2
+    `,job.DocumentID,job.TenantID)
+    _=w.emitEvent(ctx,job,"document.failed","FAILED",100,nil,nil,map[string]any{"error":cause.Error()})
+    return cause
+}
+
+func (w *Worker) emitEvent(
+    ctx context.Context,
+    job JobMessage,
+    eventType,status string,
+    progress int,
+    pageNumber,totalPages *int,
+    data map[string]any,
+) error {
+    var dataJSON any
+    if data!=nil {
+        encoded,err:=json.Marshal(data)
+        if err!=nil { return err }
+        dataJSON=string(encoded)
+    }
+
+    _,err:=w.DB.Exec(ctx,`
+      INSERT INTO job_events
+        (tenant_id,job_id,document_id,event_type,status,progress,page_number,total_pages,data_json)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb)
+    `,job.TenantID,job.JobID,job.DocumentID,eventType,status,progress,pageNumber,totalPages,dataJSON)
+    return err
+}
+
+func (w *Worker) upsertPage(
+    ctx context.Context,
+    job JobMessage,
+    page NativePage,
+    route,status,ocrArtifact,tableArtifact string,
+) error {
+    var textLayout any
+    if page.TextLayoutArtifact!=nil { textLayout=*page.TextLayoutArtifact }
+
+    _,err:=w.DB.Exec(ctx,`
+      INSERT INTO processing_pages
+        (tenant_id,job_id,document_id,run_id,page_number,route,searchable_text,status,
+         image_artifact,text_layout_artifact,ocr_artifact,table_artifact)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NULLIF($11,''),NULLIF($12,''))
+      ON CONFLICT (job_id,page_number)
+      DO UPDATE SET
+        route=EXCLUDED.route,
+        searchable_text=EXCLUDED.searchable_text,
+        status=EXCLUDED.status,
+        image_artifact=EXCLUDED.image_artifact,
+        text_layout_artifact=EXCLUDED.text_layout_artifact,
+        ocr_artifact=COALESCE(EXCLUDED.ocr_artifact,processing_pages.ocr_artifact),
+        table_artifact=COALESCE(EXCLUDED.table_artifact,processing_pages.table_artifact),
+        updated_at=now()
+    `,job.TenantID,job.JobID,job.DocumentID,job.RunID,page.Page,route,page.SearchableText,status,
+      page.ImageArtifact,textLayout,ocrArtifact,tableArtifact)
+    return err
+}
+
+func (w *Worker) updatePageOutput(
+    ctx context.Context,
+    job JobMessage,
+    page int,
+    status,ocrArtifact,tableArtifact string,
+) error {
+    _,err:=w.DB.Exec(ctx,`
+      UPDATE processing_pages
+      SET status=$1,
+          ocr_artifact=COALESCE(NULLIF($2,''),ocr_artifact),
+          table_artifact=COALESCE(NULLIF($3,''),table_artifact),
+          updated_at=now()
+      WHERE tenant_id=$4 AND job_id=$5 AND page_number=$6
+    `,status,ocrArtifact,tableArtifact,job.TenantID,job.JobID,page)
+    return err
+}
+
+func (w *Worker) createDocumentReviewTask(ctx context.Context,job JobMessage,versionID,reason string) error {
+    _,err:=w.DB.Exec(ctx,`
+      INSERT INTO review_tasks
+        (tenant_id,document_id,task_type,status,priority,reason)
+      SELECT $1,$2,'DOCUMENT_VALIDATION','OPEN',50,$3
+      WHERE NOT EXISTS (
+        SELECT 1 FROM review_tasks
+        WHERE tenant_id=$1 AND document_id=$2
+          AND task_type='DOCUMENT_VALIDATION' AND status='OPEN'
+      )
+    `,job.TenantID,job.DocumentID,reason)
+    return err
+}
+
+func (w *Worker) addArtifact(ctx context.Context,job JobMessage,kind,path string,contentType *string) error {
+    info,err:=os.Stat(path); if err!=nil { return err }
+    storageURI:=path
+    if w.ObjectStore!=nil {
+        content:="application/octet-stream"
+        if contentType!=nil && *contentType!="" { content=*contentType }
+        key:=filepath.ToSlash(filepath.Join("tenants",job.TenantID,"processing",job.DocumentID,job.RunID,strings.ToLower(kind),filepath.Base(path)))
+        storageURI,err=w.ObjectStore.ArchiveFile(ctx,path,key,content)
+        if err!=nil { return err }
+    }
+    _,err=w.DB.Exec(ctx,`
+      INSERT INTO artifacts
+        (tenant_id,document_id,run_id,artifact_type,storage_uri,content_type,size_bytes)
+      SELECT $1,$2,$3,$4,$5,$6,$7
+      WHERE NOT EXISTS (
+        SELECT 1 FROM artifacts
+        WHERE tenant_id=$1 AND run_id=$3 AND artifact_type=$4 AND storage_uri=$5
+      )
+    `,job.TenantID,job.DocumentID,job.RunID,kind,storageURI,contentType,info.Size())
+    return err
+}
+
+func (w *Worker) addVersionArtifact(ctx context.Context,job JobMessage,versionID,kind,path string,contentType *string) error {
+    info,err:=os.Stat(path); if err!=nil { return err }
+    storageURI:=path
+    if w.ObjectStore!=nil {
+        content:="application/octet-stream"
+        if contentType!=nil && *contentType!="" { content=*contentType }
+        key:=filepath.ToSlash(filepath.Join("tenants",job.TenantID,"documents",job.DocumentID,versionID,filepath.Base(path)))
+        storageURI,err=w.ObjectStore.ArchiveFile(ctx,path,key,content)
+        if err!=nil { return err }
+    }
+    _,err=w.DB.Exec(ctx,`
+      INSERT INTO artifacts
+        (tenant_id,document_id,document_version_id,run_id,artifact_type,storage_uri,content_type,size_bytes)
+      SELECT $1,$2,$3,$4,$5,$6,$7,$8
+      WHERE NOT EXISTS (
+        SELECT 1 FROM artifacts
+        WHERE tenant_id=$1 AND document_version_id=$3 AND run_id=$4
+          AND artifact_type=$5 AND storage_uri=$6
+      )
+    `,job.TenantID,job.DocumentID,versionID,job.RunID,kind,storageURI,contentType,info.Size())
+    return err
+}
+
+func strPtr(v string)*string { return &v }
+
+
+func (w *Worker) tryAgentFallback(
+    ctx context.Context,job JobMessage,canonicalBody []byte,validationResult validation.Result,pages []pageExtraction,
+)([]byte,[]byte,error){
+    var canonical map[string]any
+    if err:=json.Unmarshal(canonicalBody,&canonical); err!=nil { return nil,nil,err }
+    validationJSON,err:=json.Marshal(validationResult)
+    if err!=nil { return nil,nil,err }
+    var validationMap map[string]any
+    if err:=json.Unmarshal(validationJSON,&validationMap); err!=nil { return nil,nil,err }
+
+    response,err:=w.postJSON(ctx,"/v1/agent/resolve-invoice",map[string]any{
+        "document_id":job.DocumentID,
+        "trigger_code":"DETERMINISTIC_REVIEW_REQUIRED",
+        "canonical":canonical,
+        "validation":validationMap,
+        "pages":pages,
+    })
+    if err!=nil { return nil,nil,err }
+
+    var envelope struct {
+        Confidence float64 `json:"confidence"`
+        ResolvedCanonical map[string]any `json:"resolved_canonical"`
+    }
+    if err:=json.Unmarshal(response,&envelope); err!=nil { return nil,nil,err }
+    if envelope.Confidence<w.AgentMinConfidence || envelope.ResolvedCanonical==nil {
+        return nil,response,nil
+    }
+    resolved,err:=json.MarshalIndent(envelope.ResolvedCanonical,"","  ")
+    return resolved,response,err
+}
+
+func (w *Worker) tryDocumentReview(
+    ctx context.Context,job JobMessage,documentType string,canonicalBody []byte,validationResult validation.Result,pages []pageExtraction,
+)([]byte,[]byte,error){
+    var canonical map[string]any
+    if err:=json.Unmarshal(canonicalBody,&canonical); err!=nil { return nil,nil,err }
+    validationJSON,err:=json.Marshal(validationResult)
+    if err!=nil { return nil,nil,err }
+    var validationMap map[string]any
+    if err:=json.Unmarshal(validationJSON,&validationMap); err!=nil { return nil,nil,err }
+
+    response,err:=w.postJSON(ctx,"/v1/agent/review-document",map[string]any{
+        "document_id":job.DocumentID,
+        "document_type":documentType,
+        "trigger_code":"DETERMINISTIC_REVIEW_REQUIRED",
+        "canonical":canonical,
+        "validation":validationMap,
+        "pages":pages,
+    })
+    if err!=nil { return nil,nil,err }
+
+    var envelope struct {
+        Confidence float64 `json:"confidence"`
+        ResolvedCanonical map[string]any `json:"resolved_canonical"`
+    }
+    if err:=json.Unmarshal(response,&envelope); err!=nil { return nil,nil,err }
+    if envelope.Confidence<w.AgentMinConfidence || envelope.ResolvedCanonical==nil {
+        return nil,response,nil
+    }
+    resolved,err:=json.MarshalIndent(envelope.ResolvedCanonical,"","  ")
+    return resolved,response,err
+}
+
+
+func (w *Worker) persistAgentRun(ctx context.Context,job JobMessage,versionID string,trace []byte) error {
+    var envelope struct {
+        Provider string `json:"provider"`
+        Model string `json:"model"`
+        PromptVersion string `json:"prompt_version"`
+        Confidence float64 `json:"confidence"`
+    }
+    if err:=json.Unmarshal(trace,&envelope); err!=nil { return err }
+    _,err:=w.DB.Exec(ctx,`
+      INSERT INTO agent_runs
+        (tenant_id,document_id,document_version_id,run_id,trigger_code,provider,model,prompt_version,
+         status,confidence,input_json,output_json,completed_at)
+      VALUES ($1,$2,$3,$4,'DETERMINISTIC_REVIEW_REQUIRED',$5,$6,$7,'COMPLETED',$8,
+              '{}'::jsonb,$9::jsonb,now())
+    `,job.TenantID,job.DocumentID,versionID,job.RunID,envelope.Provider,envelope.Model,
+      envelope.PromptVersion,envelope.Confidence,string(trace))
+    return err
+}
