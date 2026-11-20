@@ -397,12 +397,12 @@ def run_agent_invoice_resolution(request: AgentInvoiceResolveRequest) -> dict[st
 @app.post("/v1/agent/review-document")
 def run_agent_document_review(request: AgentDocumentReviewRequest) -> dict[str, Any]:
     try:
-        tier = "qwen_fallback"
+        tier = "agent"
         escalated = False
         glm_elapsed_ms: int | None = None
-        fallback_elapsed_ms: int | None = None
+        agent_elapsed_ms: int | None = None
         glm_error: str | None = None
-        qwen_error: str | None = None
+        agent_error: str | None = None
 
         proposal = None
         glm_proposal = None
@@ -431,7 +431,7 @@ def run_agent_document_review(request: AgentDocumentReviewRequest) -> dict[str, 
                         tier = "glm_ocr"
                     else:
                         escalated = True
-                        tier = "glm_ocr_partial_qwen"
+                        tier = "glm_ocr_partial_agent"
                 else:
                     glm_proposal = None
                     escalated = True
@@ -443,30 +443,36 @@ def run_agent_document_review(request: AgentDocumentReviewRequest) -> dict[str, 
         if proposal is None:
             started = time.perf_counter()
             try:
-                qwen_proposal = review_document(
+                agent_proposal = review_document(
                     document_type=request.document_type,
                     canonical=review_canonical,
                     validation=request.validation,
                     pages=request.pages,
                 )
-                fallback_elapsed_ms = int((time.perf_counter() - started) * 1000)
-                proposal = qwen_proposal
-                tier = "glm_ocr_plus_qwen" if glm_resolved is not None else "qwen_fallback"
+                agent_elapsed_ms = int((time.perf_counter() - started) * 1000)
+                proposal = agent_proposal
+                tier = "glm_ocr_plus_agent" if glm_resolved is not None else "agent"
             except Exception as exc:
-                fallback_elapsed_ms = int((time.perf_counter() - started) * 1000)
-                qwen_error = str(exc)[:500]
+                agent_elapsed_ms = int((time.perf_counter() - started) * 1000)
+                agent_error = str(exc)[:500]
                 if glm_proposal is not None and glm_resolved is not None:
                     proposal = glm_proposal
                     tier = "glm_ocr_partial"
                 else:
                     raise
 
-        base_canonical = glm_resolved if tier == "glm_ocr_plus_qwen" and glm_resolved is not None else request.canonical
+        base_canonical = (
+            glm_resolved
+            if tier == "glm_ocr_plus_agent" and glm_resolved is not None
+            else request.canonical
+        )
         resolved = (
             apply_document_proposal(base_canonical, proposal, request.pages)
             if tier != "glm_ocr_partial"
             else glm_resolved
         )
+        agent_trace = proposal.raw_response.get("_agent_trace", {})
+        review_errors = proposal.raw_response.get("_review_errors", {})
         return {
             "provider": proposal.provider,
             "model": proposal.model,
@@ -475,9 +481,13 @@ def run_agent_document_review(request: AgentDocumentReviewRequest) -> dict[str, 
             "review_tier": tier,
             "escalated": escalated,
             "glm_elapsed_ms": glm_elapsed_ms,
-            "fallback_elapsed_ms": fallback_elapsed_ms,
+            "agent_elapsed_ms": agent_elapsed_ms,
+            "fallback_elapsed_ms": agent_elapsed_ms,
             "glm_error": glm_error,
-            "qwen_error": qwen_error,
+            "agent_error": agent_error,
+            "qwen_error": agent_error,
+            "agent_trace": agent_trace,
+            "review_errors": review_errors,
             "field_updates": proposal.field_updates,
             "field_removals": proposal.field_removals,
             "evidence": proposal.evidence,
@@ -490,14 +500,18 @@ def run_agent_document_review(request: AgentDocumentReviewRequest) -> dict[str, 
         return {
             "provider": os.getenv("AGENT_PROVIDER", "disabled"),
             "model": os.getenv("AGENT_MODEL", ""),
-            "prompt_version": "document-review-failed-v1",
+            "prompt_version": "document-review-failed-v2",
             "confidence": 0.0,
             "review_tier": "failed",
             "escalated": True,
             "glm_elapsed_ms": None,
+            "agent_elapsed_ms": None,
             "fallback_elapsed_ms": None,
             "glm_error": None,
+            "agent_error": message,
             "qwen_error": message,
+            "agent_trace": {},
+            "review_errors": {},
             "field_updates": {},
             "field_removals": [],
             "evidence": {},
