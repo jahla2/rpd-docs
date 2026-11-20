@@ -214,6 +214,21 @@ def _tools() -> list[dict[str, Any]]:
         {
             "type": "function",
             "function": {
+                "name": "get_ocr_blocks",
+                "description": "Read OCR blocks for one page so missing fields can be found without guessing.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "page": {"type": "integer", "minimum": 1},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 300},
+                    },
+                    "required": ["page"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "search_ocr",
                 "description": "Search OCR blocks for a phrase or value and return matching block IDs and nearby text.",
                 "parameters": {
@@ -243,7 +258,7 @@ def _tools() -> list[dict[str, Any]]:
                     "type": "object",
                     "properties": {
                         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-                        "field_updates": {"type": "object", "additionalProperties": {"type": ["string", "number"]}},
+                        "field_updates": {"type": "object", "additionalProperties": {"type": "string"}},
                         "field_removals": {"type": "array", "items": {"type": "string"}},
                         "evidence": {
                             "type": "object",
@@ -272,6 +287,25 @@ def _execute_tool(
 
     if name == "get_current_canonical":
         return canonical
+
+    if name == "get_ocr_blocks":
+        page_number = max(1, int(arguments.get("page") or 1))
+        limit = max(1, min(300, int(arguments.get("limit") or 200)))
+        blocks = [
+            block for block in _block_lookup(pages).values()
+            if int(block.get("page") or 0) == page_number
+        ][:limit]
+        return {
+            "page": page_number,
+            "blocks": [
+                {
+                    "block_id": block["block_id"],
+                    "text": block["text"],
+                    "confidence": block["confidence"],
+                }
+                for block in blocks
+            ],
+        }
 
     if name == "search_ocr":
         query = str(arguments.get("query") or "").strip().lower()
@@ -334,6 +368,7 @@ def _ollama_review(
     tools = _tools()
     num_ctx = int(os.getenv("AGENT_NUM_CTX", "8192"))
 
+    used_read_tool = False
     for _ in range(8):
         response = httpx.post(
             base_url.rstrip("/") + "/api/chat",
@@ -360,12 +395,24 @@ def _ollama_review(
             function = call.get("function") or {}
             name = str(function.get("name") or "")
             arguments = function.get("arguments") or {}
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments)
+                except json.JSONDecodeError:
+                    arguments = {}
             if not isinstance(arguments, dict):
                 arguments = {}
 
             if name == "propose_document_patch":
+                if not used_read_tool:
+                    messages.append({
+                        "role": "tool",
+                        "content": json.dumps({"error": "inspect document evidence before proposing a patch"}),
+                    })
+                    continue
                 return arguments
 
+            used_read_tool = True
             result = _execute_tool(
                 name,
                 arguments,
@@ -459,9 +506,21 @@ def apply_document_proposal(
 
     required = ["supplier_name", "closing_balance"]
     missing = [name for name in required if not (fields.get(name) or {}).get("value")]
-    result["requires_review"] = bool(missing)
+
+    transaction_rows = ((result.get("tables") or {}).get("transactions") or [])
+    required_transaction_fields = {"date", "invoice_number", "debit", "credit", "balance"}
+    incomplete_rows = [
+        index + 1
+        for index, row in enumerate(transaction_rows)
+        if not required_transaction_fields.issubset(set(row))
+    ]
+    transaction_mapping_incomplete = bool(transaction_rows) and bool(incomplete_rows)
+
+    result["requires_review"] = bool(missing or transaction_mapping_incomplete)
     validation_summary = result.setdefault("validation", {})
     validation_summary["missing_required_fields"] = missing
+    validation_summary["transaction_mapping_incomplete"] = transaction_mapping_incomplete
+    validation_summary["incomplete_transaction_rows"] = incomplete_rows
     result["agent_review"] = {
         "provider": proposal.provider,
         "model": proposal.model,
