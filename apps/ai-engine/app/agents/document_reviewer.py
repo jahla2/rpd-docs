@@ -4,9 +4,15 @@ import json
 import os
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Annotated, Any, Literal
 
-import httpx
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.tools import tool
+from langchain_ollama import ChatOllama
+from langgraph.graph import END, START, StateGraph, add_messages
+from langgraph.prebuilt import ToolNode
+from pydantic import BaseModel, Field
+from typing_extensions import TypedDict
 
 from app.extraction.invoice import normalize_date, normalize_decimal, parse_table_html
 
@@ -39,23 +45,26 @@ def _system_prompt(document_type: str) -> str:
     return f"""You are a local financial-document review agent.
 The document type is {document_type}.
 
-Your job is to review deterministic extraction problems, inspect only the supplied evidence through tools,
-and propose a conservative patch. Never invent values. Never approve payments, reconciliation, accounting
-entries, or financial decisions. Never request shell, database, network, filesystem, or write access.
+Your role is to investigate deterministic extraction problems with read-only tools, reason over the returned
+OCR/table evidence, and identify conservative corrections. Never invent values. Never approve payments,
+reconciliation, accounting entries, or financial decisions. Never request shell, database, network, filesystem,
+or write access.
 
-When read-only tools are available and tool calling is active, inspect them before proposing a patch and
-finish by calling propose_document_patch exactly once. In structured-evidence fallback mode, use only the
-bounded evidence packet supplied in the prompt and return the requested JSON schema directly.
+Use tools to inspect the deterministic validation state, current canonical values, OCR blocks, OCR search results,
+and recognized table rows. Do not attempt to submit a patch as a tool call. When you have enough evidence, stop
+calling tools and summarize the evidence you found; a separate structured-output node will create the patch.
 
 For supplier_statement, only these top-level fields may be changed:
 supplier_name, account_number, statement_date, currency, opening_balance, closing_balance.
 
 Rules:
-- Every field update must be supported by OCR block IDs supplied in the evidence object.
-- If a current field is clearly a false positive, you may propose removing it.
-- Do not rewrite transaction rows in v1. Instead put transaction/schema concerns in suggestions.
+- Investigate missing required fields first.
+- Investigate suspicious current values such as warning text being mistaken for an account number.
+- Distinguish the statement date from transaction dates using labels and nearby OCR evidence.
+- Every proposed value must be visibly supported by OCR block IDs returned by tools.
+- Do not rewrite transaction rows in v1; identify transaction/schema concerns only.
 - Prefer no change over an unsupported guess.
-- Keep the summary concise and evidence-based.
+- Keep reasoning concise and evidence-focused.
 """
 
 
@@ -193,109 +202,101 @@ def _sanitize_proposal(
     )
 
 
-def _tools() -> list[dict[str, Any]]:
-    no_args = {"type": "object", "properties": {}}
-    return [
-        {
-            "type": "function",
-            "function": {
-                "name": "get_validation_issues",
-                "description": "Read deterministic validation failures and warnings for the document.",
-                "parameters": no_args,
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "get_current_canonical",
-                "description": "Read the current deterministic canonical document.",
-                "parameters": no_args,
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "get_ocr_blocks",
-                "description": "Read OCR blocks for one page so missing fields can be found without guessing.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "page": {"type": "integer", "minimum": 1},
-                        "limit": {"type": "integer", "minimum": 1, "maximum": 300},
-                    },
-                    "required": ["page"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "search_ocr",
-                "description": "Search OCR blocks for a phrase or value and return matching block IDs and nearby text.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string"},
-                        "max_results": {"type": "integer", "minimum": 1, "maximum": 20},
-                    },
-                    "required": ["query"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "get_table_rows",
-                "description": "Read recognized table rows from all pages for mapping review.",
-                "parameters": no_args,
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "propose_document_patch",
-                "description": "Finish the review with an evidence-backed document patch and concise suggestions.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-                        "field_updates": {"type": "object", "additionalProperties": {"type": "string"}},
-                        "field_removals": {"type": "array", "items": {"type": "string"}},
-                        "evidence": {
-                            "type": "object",
-                            "additionalProperties": {"type": "array", "items": {"type": "string"}},
-                        },
-                        "suggestions": {"type": "array", "items": {"type": "string"}},
-                        "summary": {"type": "string"},
-                    },
-                    "required": ["confidence", "field_updates", "evidence", "summary"],
-                },
-            },
-        },
-    ]
+class _DocumentPatchSchema(BaseModel):
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    field_updates: dict[str, str] = Field(default_factory=dict)
+    field_removals: list[str] = Field(default_factory=list)
+    evidence: dict[str, list[str]] = Field(default_factory=dict)
+    suggestions: list[str] = Field(default_factory=list)
+    summary: str = ""
 
 
-def _execute_tool(
-    name: str,
-    arguments: dict[str, Any],
+class _ReviewGraphState(TypedDict):
+    messages: Annotated[list[BaseMessage], add_messages]
+    model_turns: int
+    final_payload: dict[str, Any] | None
+    error: str | None
+
+
+def _compact_canonical(canonical: dict[str, Any]) -> dict[str, Any]:
+    fields: dict[str, Any] = {}
+    for name, raw_field in (canonical.get("fields") or {}).items():
+        if not isinstance(raw_field, dict):
+            continue
+        fields[str(name)] = {
+            "value": raw_field.get("value"),
+            "raw": raw_field.get("raw"),
+        }
+
+    transactions = []
+    for row in ((canonical.get("tables") or {}).get("transactions") or [])[:12]:
+        if isinstance(row, dict):
+            transactions.append({
+                str(key): value
+                for key, value in row.items()
+                if key in {"page", "date", "invoice_number", "reference", "due_date", "description", "debit", "credit", "balance"}
+            })
+
+    return {
+        "document_type": canonical.get("document_type"),
+        "fields": fields,
+        "transactions": transactions,
+        "requires_review": bool(canonical.get("requires_review")),
+    }
+
+
+def _compact_validation(validation: dict[str, Any]) -> dict[str, Any]:
+    rules = []
+    for rule in validation.get("rules") or []:
+        if not isinstance(rule, dict):
+            continue
+        status = str(rule.get("status") or "").upper()
+        if status not in {"FAIL", "WARN"}:
+            continue
+        rules.append({
+            "code": rule.get("code"),
+            "status": status,
+            "message": rule.get("message"),
+        })
+        if len(rules) >= 16:
+            break
+
+    return {
+        "missing_required_fields": list(validation.get("missing_required_fields") or [])[:20],
+        "low_confidence_fields": list(validation.get("low_confidence_fields") or [])[:20],
+        "transaction_count": validation.get("transaction_count"),
+        "rules": rules,
+    }
+
+
+def _make_review_tools(
     *,
     canonical: dict[str, Any],
     validation: dict[str, Any],
     pages: list[dict[str, Any]],
-) -> dict[str, Any]:
-    if name == "get_validation_issues":
-        return validation
+) -> list[Any]:
+    block_lookup = _block_lookup(pages)
+    flat_blocks = list(block_lookup.values())
 
-    if name == "get_current_canonical":
-        return canonical
+    @tool
+    def get_validation_issues() -> dict[str, Any]:
+        """Read deterministic validation failures and warnings for this document."""
+        return _compact_validation(validation)
 
-    if name == "get_ocr_blocks":
-        page_number = max(1, int(arguments.get("page") or 1))
-        limit = max(1, min(300, int(arguments.get("limit") or 200)))
+    @tool
+    def get_current_canonical() -> dict[str, Any]:
+        """Read the compact current deterministic canonical document."""
+        return _compact_canonical(canonical)
+
+    @tool
+    def get_ocr_blocks(page: int, limit: int = 80) -> dict[str, Any]:
+        """Read OCR blocks for one page. Use this when a field cannot be found with a targeted OCR search."""
+        page_number = max(1, int(page))
+        bounded_limit = max(1, min(120, int(limit)))
         blocks = [
-            block for block in _block_lookup(pages).values()
+            block for block in flat_blocks
             if int(block.get("page") or 0) == page_number
-        ][:limit]
+        ][:bounded_limit]
         return {
             "page": page_number,
             "blocks": [
@@ -308,149 +309,107 @@ def _execute_tool(
             ],
         }
 
-    if name == "search_ocr":
-        query = str(arguments.get("query") or "").strip().lower()
-        max_results = max(1, min(20, int(arguments.get("max_results") or 8)))
-        if not query:
-            return {"matches": []}
+    @tool
+    def search_ocr(query: str, max_results: int = 8) -> dict[str, Any]:
+        """Search OCR text for a phrase/value and return matching block IDs with nearby OCR context."""
+        normalized_query = _normalize_evidence_text(str(query))
+        bounded_results = max(1, min(12, int(max_results)))
+        if not normalized_query:
+            return {"query": query, "matches": []}
+
+        query_tokens = [token for token in normalized_query.split() if len(token) >= 2]
         matches = []
-        flat = list(_block_lookup(pages).values())
-        for index, block in enumerate(flat):
-            if query not in str(block["text"]).lower():
+        for index, block in enumerate(flat_blocks):
+            normalized_text = _normalize_evidence_text(str(block.get("text") or ""))
+            if not normalized_text:
                 continue
-            start = max(0, index - 1)
-            end = min(len(flat), index + 2)
+            exact = normalized_query in normalized_text
+            token_match = bool(query_tokens) and all(token in normalized_text for token in query_tokens)
+            if not exact and not token_match:
+                continue
+            nearby = []
+            for item in flat_blocks[max(0, index - 2): min(len(flat_blocks), index + 3)]:
+                if item.get("page") != block.get("page"):
+                    continue
+                nearby.append({
+                    "block_id": item["block_id"],
+                    "text": item["text"],
+                })
             matches.append({
                 "block_id": block["block_id"],
                 "page": block["page"],
                 "text": block["text"],
                 "confidence": block["confidence"],
-                "nearby": [
-                    {"block_id": item["block_id"], "text": item["text"]}
-                    for item in flat[start:end]
-                ],
+                "nearby": nearby,
             })
-            if len(matches) >= max_results:
+            if len(matches) >= bounded_results:
                 break
-        return {"matches": matches}
+        return {"query": query, "matches": matches}
 
-    if name == "get_table_rows":
+    @tool
+    def get_table_rows() -> dict[str, Any]:
+        """Read a bounded sample of recognized table rows for transaction mapping review."""
         pages_out = []
-        for page in pages[:20]:
+        for page in pages[:5]:
             rows = parse_table_html(page.get("table_html"))
             pages_out.append({
                 "page": page.get("page"),
-                "rows": rows[:40],
+                "rows": rows[:12],
             })
         return {"pages": pages_out}
 
-    raise RuntimeError(f"unsupported review tool {name!r}")
+    return [
+        get_validation_issues,
+        get_current_canonical,
+        search_ocr,
+        get_ocr_blocks,
+        get_table_rows,
+    ]
 
 
-def _parse_json_object(content: str) -> dict[str, Any]:
-    text = content.strip()
-    if not text:
-        raise RuntimeError("document review agent returned empty structured output")
-
-    if text.startswith("```"):
-        lines = text.splitlines()
-        if lines and lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        text = "\n".join(lines).strip()
-
-    try:
-        value = json.loads(text)
-        if isinstance(value, dict):
-            return value
-    except json.JSONDecodeError:
-        pass
-
-    decoder = json.JSONDecoder()
-    for index, char in enumerate(text):
-        if char != "{":
+def _tool_observations(messages: list[BaseMessage]) -> list[dict[str, Any]]:
+    observations: list[dict[str, Any]] = []
+    total_chars = 0
+    for message in messages:
+        if not isinstance(message, ToolMessage):
             continue
-        try:
-            value, _ = decoder.raw_decode(text[index:])
-        except json.JSONDecodeError:
-            continue
-        if isinstance(value, dict):
-            return value
-
-    raise RuntimeError("document review agent returned invalid structured JSON")
-
-
-def _structured_review_schema() -> dict[str, Any]:
-    return {
-        "type": "object",
-        "properties": {
-            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-            "field_updates": {
-                "type": "object",
-                "additionalProperties": {"type": "string"},
-            },
-            "field_removals": {
-                "type": "array",
-                "items": {"type": "string"},
-            },
-            "evidence": {
-                "type": "object",
-                "additionalProperties": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                },
-            },
-            "suggestions": {
-                "type": "array",
-                "items": {"type": "string"},
-            },
-            "summary": {"type": "string"},
-        },
-        "required": [
-            "confidence",
-            "field_updates",
-            "field_removals",
-            "evidence",
-            "suggestions",
-            "summary",
-        ],
-    }
-
-
-def _direct_review_context(
-    *,
-    canonical: dict[str, Any],
-    validation: dict[str, Any],
-    pages: list[dict[str, Any]],
-) -> dict[str, Any]:
-    ocr_blocks: list[dict[str, Any]] = []
-    for block in _block_lookup(pages).values():
-        ocr_blocks.append({
-            "block_id": block["block_id"],
-            "page": block["page"],
-            "text": block["text"],
-            "confidence": block["confidence"],
-        })
-        if len(ocr_blocks) >= 220:
+        content = str(message.content)
+        remaining = max(0, 18000 - total_chars)
+        if remaining <= 0:
             break
-
-    table_pages = []
-    for page in pages[:5]:
-        table_pages.append({
-            "page": page.get("page"),
-            "rows": parse_table_html(page.get("table_html"))[:30],
+        clipped = content[: min(6000, remaining)]
+        observations.append({
+            "tool": message.name or "tool",
+            "content": clipped,
         })
+        total_chars += len(clipped)
+    return observations
 
+
+def _agent_trace(messages: list[BaseMessage], model_turns: int) -> dict[str, Any]:
+    calls: list[dict[str, Any]] = []
+    observations: list[dict[str, Any]] = []
+    for message in messages:
+        if isinstance(message, AIMessage):
+            for call in message.tool_calls:
+                calls.append({
+                    "name": str(call.get("name") or ""),
+                    "args": call.get("args") if isinstance(call.get("args"), dict) else {},
+                })
+        elif isinstance(message, ToolMessage):
+            observations.append({
+                "tool": message.name or "tool",
+                "content": str(message.content)[:1000],
+            })
     return {
-        "canonical": canonical,
-        "validation": validation,
-        "ocr_blocks": ocr_blocks,
-        "table_pages": table_pages,
+        "model_turns": model_turns,
+        "tool_call_count": len(calls),
+        "tool_calls": calls[:12],
+        "observations": observations[:12],
     }
 
 
-def _ollama_structured_review(
+def _run_langgraph_review(
     base_url: str,
     model: str,
     *,
@@ -458,161 +417,188 @@ def _ollama_structured_review(
     canonical: dict[str, Any],
     validation: dict[str, Any],
     pages: list[dict[str, Any]],
-    num_ctx: int,
 ) -> dict[str, Any]:
-    context = _direct_review_context(
+    max_turns = max(2, min(8, int(os.getenv("AGENT_MAX_TURNS", "5"))))
+    max_tool_calls = max(2, min(16, int(os.getenv("AGENT_MAX_TOOL_CALLS", "8"))))
+    num_ctx = max(4096, min(32768, int(os.getenv("AGENT_NUM_CTX", "8192"))))
+    keep_alive = os.getenv("AGENT_KEEP_ALIVE", "2m").strip() or "2m"
+
+    tools = _make_review_tools(
         canonical=canonical,
         validation=validation,
         pages=pages,
     )
-    schema = _structured_review_schema()
-    prompt = (
-        _system_prompt(document_type)
-        + "\nThe model did not emit a tool call, so perform the review from this bounded evidence packet. "
-        + "Return only JSON matching the supplied schema. Every field update must include OCR block IDs from "
-        + "the evidence packet. Never invent block IDs or values.\nEvidence packet:\n"
-        + json.dumps(context, separators=(",", ":"), ensure_ascii=False)
+    llm = ChatOllama(
+        model=model,
+        base_url=base_url,
+        temperature=0,
+        num_ctx=num_ctx,
+        keep_alive=keep_alive,
+        validate_model_on_init=True,
     )
-    response = httpx.post(
-        base_url.rstrip("/") + "/api/chat",
-        timeout=120.0,
-        json={
-            "model": model,
-            "stream": False,
-            "think": False,
-            "format": schema,
-            "options": {
-                "temperature": 0,
-                "num_ctx": max(4096, min(32768, num_ctx)),
-            },
-            "messages": [{"role": "user", "content": prompt}],
-        },
+    tool_llm = llm.bind_tools(tools)
+    structured_llm = llm.with_structured_output(
+        _DocumentPatchSchema,
+        method="json_schema",
+        include_raw=True,
     )
-    response.raise_for_status()
-    outer = response.json()
-    content = str(((outer.get("message") or {}).get("content") or "")).strip()
-    try:
-        return _parse_json_object(content)
-    except RuntimeError:
-        retry = httpx.post(
-            base_url.rstrip("/") + "/api/chat",
-            timeout=120.0,
-            json={
-                "model": model,
-                "stream": False,
-                "think": False,
-                "format": "json",
-                "options": {
-                    "temperature": 0,
-                    "num_ctx": max(4096, min(32768, num_ctx)),
-                },
-                "messages": [{
-                    "role": "user",
-                    "content": (
-                        "Return one valid JSON object only. Do not use markdown or commentary. "
-                        "Use exactly these keys: confidence, field_updates, field_removals, evidence, suggestions, summary. "
-                        "Every update must use only values and OCR block IDs present in this evidence packet. "
-                        "If uncertain, return an empty field_updates object and confidence below 0.90. "
-                        "Evidence packet: "
-                        + json.dumps(context, separators=(",", ":"), ensure_ascii=False)
-                    ),
-                }],
-            },
+
+    def agent_node(state: _ReviewGraphState) -> dict[str, Any]:
+        response = tool_llm.invoke(state["messages"])
+        return {
+            "messages": [response],
+            "model_turns": int(state.get("model_turns") or 0) + 1,
+        }
+
+    def nudge_node(state: _ReviewGraphState) -> dict[str, Any]:
+        return {
+            "messages": [
+                HumanMessage(
+                    content=(
+                        "You have not inspected document evidence yet. Use the read-only tools now. "
+                        "Start with validation issues, then search OCR or inspect OCR blocks for each missing/suspicious field."
+                    )
+                )
+            ]
+        }
+
+    def route_after_agent(state: _ReviewGraphState) -> Literal["tools", "nudge", "finalize"]:
+        messages = state.get("messages") or []
+        last = messages[-1] if messages else None
+        turns = int(state.get("model_turns") or 0)
+        total_calls = sum(
+            len(message.tool_calls)
+            for message in messages
+            if isinstance(message, AIMessage)
         )
-        retry.raise_for_status()
-        retry_outer = retry.json()
-        retry_content = str(((retry_outer.get("message") or {}).get("content") or "")).strip()
-        return _parse_json_object(retry_content)
+        has_observation = any(isinstance(message, ToolMessage) for message in messages)
 
+        if isinstance(last, AIMessage) and last.tool_calls:
+            if turns >= max_turns or total_calls > max_tool_calls:
+                return "finalize"
+            return "tools"
 
-def _ollama_review(
-    base_url: str,
-    model: str,
-    *,
-    document_type: str,
-    canonical: dict[str, Any],
-    validation: dict[str, Any],
-    pages: list[dict[str, Any]],
-) -> dict[str, Any]:
-    messages: list[dict[str, Any]] = [
-        {"role": "system", "content": _system_prompt(document_type)},
-        {
-            "role": "user",
-            "content": (
-                "Review this document. Start with validation and canonical state, then search OCR/table evidence "
-                "for missing or suspicious fields. Finish with propose_document_patch."
+        if not has_observation and turns < min(max_turns, 2):
+            return "nudge"
+        return "finalize"
+
+    def finalize_node(state: _ReviewGraphState) -> dict[str, Any]:
+        observations = _tool_observations(state.get("messages") or [])
+        final_prompt = {
+            "current_canonical": _compact_canonical(canonical),
+            "validation": _compact_validation(validation),
+            "tool_observations": observations,
+        }
+        result = structured_llm.invoke([
+            SystemMessage(
+                content=(
+                    "Create the final conservative supplier-statement correction proposal. "
+                    "Use only values and OCR block IDs that appear in tool observations. "
+                    "Every field_updates entry must have evidence block IDs. "
+                    "Only remove a current field when the observed OCR context clearly proves it is a false positive. "
+                    "Do not rewrite transaction rows. If evidence is insufficient, return no update and lower confidence."
+                )
             ),
+            HumanMessage(
+                content=json.dumps(final_prompt, separators=(",", ":"), ensure_ascii=False)
+            ),
+        ])
+        parsed = result.get("parsed") if isinstance(result, dict) else result
+        parsing_error = result.get("parsing_error") if isinstance(result, dict) else None
+        if parsing_error is not None:
+            raise RuntimeError(f"structured proposal parsing failed: {parsing_error}")
+        if isinstance(parsed, _DocumentPatchSchema):
+            payload = parsed.model_dump()
+        elif isinstance(parsed, dict):
+            payload = parsed
+        else:
+            raise RuntimeError("structured proposal returned no parsed payload")
+        return {"final_payload": payload}
+
+    tool_node = ToolNode(
+        tools,
+        handle_tool_errors=lambda exc: f"Read-only tool failed: {type(exc).__name__}: {exc}",
+    )
+
+    graph = StateGraph(_ReviewGraphState)
+    graph.add_node("agent", agent_node)
+    graph.add_node("nudge", nudge_node)
+    graph.add_node("tools", tool_node)
+    graph.add_node("finalize", finalize_node)
+    graph.add_edge(START, "agent")
+    graph.add_conditional_edges(
+        "agent",
+        route_after_agent,
+        {
+            "tools": "tools",
+            "nudge": "nudge",
+            "finalize": "finalize",
         },
-    ]
-    tools = _tools()
-    num_ctx = int(os.getenv("AGENT_NUM_CTX", "8192"))
+    )
+    graph.add_edge("nudge", "agent")
+    graph.add_edge("tools", "agent")
+    graph.add_edge("finalize", END)
 
-    used_read_tool = False
-    for _ in range(8):
-        response = httpx.post(
-            base_url.rstrip("/") + "/api/chat",
-            timeout=120.0,
-            json={
-                "model": model,
-                "stream": False,
-                "think": False,
-                "tools": tools,
-                "options": {"temperature": 0, "num_ctx": max(4096, min(32768, num_ctx))},
-                "messages": messages,
-            },
-        )
-        response.raise_for_status()
-        outer = response.json()
-        message = outer.get("message") or {}
-        messages.append(message)
+    compiled = graph.compile()
+    initial_state: _ReviewGraphState = {
+        "messages": [
+            SystemMessage(content=_system_prompt(document_type)),
+            HumanMessage(
+                content=(
+                    "Review this document for missing or suspicious top-level fields. "
+                    "Use validation/canonical tools first, then targeted OCR searches. "
+                    "Stop calling tools once you have enough evidence for a conservative proposal."
+                )
+            ),
+        ],
+        "model_turns": 0,
+        "final_payload": None,
+        "error": None,
+    }
+    result = compiled.invoke(
+        initial_state,
+        config={"recursion_limit": max(16, max_turns * 3 + 4)},
+    )
+    payload = result.get("final_payload")
+    if not isinstance(payload, dict):
+        raise RuntimeError("LangGraph document reviewer returned no final payload")
+    payload["_agent_trace"] = _agent_trace(
+        result.get("messages") or [],
+        int(result.get("model_turns") or 0),
+    )
+    return payload
 
-        tool_calls = message.get("tool_calls") or []
-        if not tool_calls:
-            return _ollama_structured_review(
-                base_url,
-                model,
-                document_type=document_type,
-                canonical=canonical,
-                validation=validation,
-                pages=pages,
-                num_ctx=num_ctx,
-            )
 
-        for call in tool_calls:
-            function = call.get("function") or {}
-            name = str(function.get("name") or "")
-            arguments = function.get("arguments") or {}
-            if isinstance(arguments, str):
-                try:
-                    arguments = json.loads(arguments)
-                except json.JSONDecodeError:
-                    arguments = {}
-            if not isinstance(arguments, dict):
-                arguments = {}
+def _proposal_score(proposal: DocumentReviewProposal) -> tuple[int, int, float]:
+    required = {"supplier_name", "closing_balance"}
+    required_updates = sum(1 for name in required if name in proposal.field_updates)
+    changes = len(proposal.field_updates) + len(proposal.field_removals)
+    return (required_updates, changes, proposal.confidence)
 
-            if name == "propose_document_patch":
-                if not used_read_tool:
-                    messages.append({
-                        "role": "tool",
-                        "content": json.dumps({"error": "inspect document evidence before proposing a patch"}),
-                    })
-                    continue
-                return arguments
 
-            used_read_tool = True
-            result = _execute_tool(
-                name,
-                arguments,
-                canonical=canonical,
-                validation=validation,
-                pages=pages,
-            )
-            messages.append({
-                "role": "tool",
-                "content": json.dumps(result, separators=(",", ":")),
-            })
+def _proposal_acceptable(
+    proposal: DocumentReviewProposal,
+    *,
+    canonical: dict[str, Any],
+) -> bool:
+    threshold = max(0.0, min(1.0, float(os.getenv("AGENT_MIN_CONFIDENCE", "0.90"))))
+    if proposal.confidence < threshold:
+        return False
+    if not (proposal.field_updates or proposal.field_removals):
+        return False
 
-    raise RuntimeError("document review agent exceeded tool-call limit")
+    current_fields = {
+        str(name): str((field or {}).get("value") or "").strip()
+        for name, field in (canonical.get("fields") or {}).items()
+        if isinstance(field, dict)
+    }
+    for field in proposal.field_removals:
+        current_fields.pop(field, None)
+    current_fields.update({
+        name: str(value).strip()
+        for name, value in proposal.field_updates.items()
+    })
+    return all(current_fields.get(name) for name in ("supplier_name", "closing_balance"))
 
 
 def review_document(
@@ -623,36 +609,83 @@ def review_document(
     pages: list[dict[str, Any]],
 ) -> DocumentReviewProposal:
     provider = os.getenv("AGENT_PROVIDER", "disabled").strip().lower()
-    model = os.getenv("AGENT_MODEL", "").strip()
     document_type = document_type.strip().lower()
 
     if provider == "disabled":
         raise RuntimeError("agent fallback provider is disabled")
     if document_type != "supplier_statement":
         raise RuntimeError(f"document review is not enabled for {document_type!r}")
-
     if provider != "ollama":
-        raise RuntimeError("document-reviewer-v1 currently requires AGENT_PROVIDER=ollama")
+        raise RuntimeError("document-reviewer-v2 currently requires AGENT_PROVIDER=ollama")
 
     base_url = os.getenv("AGENT_BASE_URL", "http://localhost:11434").strip()
-    if not model:
-        model = "qwen3.5:9b"
+    primary_model = os.getenv("AGENT_MODEL", "ministral-3:8b").strip() or "ministral-3:8b"
+    fallback_model = os.getenv("AGENT_FALLBACK_MODEL", "qwen3.5:9b").strip()
 
-    payload = _ollama_review(
-        base_url,
-        model,
-        document_type=document_type,
-        canonical=canonical,
-        validation=validation,
-        pages=pages,
+    primary_error: str | None = None
+    primary: DocumentReviewProposal | None = None
+    try:
+        primary_payload = _run_langgraph_review(
+            base_url,
+            primary_model,
+            document_type=document_type,
+            canonical=canonical,
+            validation=validation,
+            pages=pages,
+        )
+        primary = _sanitize_proposal(
+            primary_payload,
+            provider=provider,
+            model=primary_model,
+            document_type=document_type,
+            pages=pages,
+        )
+        primary.prompt_version = "document-reviewer-langgraph-v2"
+        if _proposal_acceptable(primary, canonical=canonical):
+            return primary
+    except Exception as exc:
+        primary_error = str(exc)[:500]
+
+    fallback: DocumentReviewProposal | None = None
+    fallback_error: str | None = None
+    if fallback_model and fallback_model != primary_model:
+        try:
+            fallback_payload = _run_langgraph_review(
+                base_url,
+                fallback_model,
+                document_type=document_type,
+                canonical=canonical,
+                validation=validation,
+                pages=pages,
+            )
+            fallback = _sanitize_proposal(
+                fallback_payload,
+                provider=provider,
+                model=fallback_model,
+                document_type=document_type,
+                pages=pages,
+            )
+            fallback.prompt_version = "document-reviewer-langgraph-v2-fallback"
+        except Exception as exc:
+            fallback_error = str(exc)[:500]
+
+    candidates = [proposal for proposal in (primary, fallback) if proposal is not None]
+    if candidates:
+        selected = max(candidates, key=_proposal_score)
+        selected.raw_response.setdefault("_review_errors", {
+            "primary": primary_error,
+            "fallback": fallback_error,
+        })
+        return selected
+
+    details = "; ".join(
+        value for value in (
+            f"primary={primary_error}" if primary_error else "",
+            f"fallback={fallback_error}" if fallback_error else "",
+        )
+        if value
     )
-    return _sanitize_proposal(
-        payload,
-        provider=provider,
-        model=model,
-        document_type=document_type,
-        pages=pages,
-    )
+    raise RuntimeError(f"LangGraph document review failed: {details or 'no proposal'}")
 
 
 def apply_document_proposal(
@@ -718,5 +751,7 @@ def apply_document_proposal(
         "field_updates": proposal.field_updates,
         "field_removals": proposal.field_removals,
         "evidence": proposal.evidence,
+        "trace": proposal.raw_response.get("_agent_trace", {}),
+        "review_errors": proposal.raw_response.get("_review_errors", {}),
     }
     return result
