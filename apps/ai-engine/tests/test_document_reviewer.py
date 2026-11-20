@@ -1,4 +1,4 @@
-from app.agents.document_reviewer import _sanitize_proposal, apply_document_proposal
+from app.agents.document_reviewer import _parse_json_object, _sanitize_proposal, apply_document_proposal
 
 
 def _pages() -> list[dict]:
@@ -113,3 +113,20 @@ def test_supplier_statement_review_rejects_hallucinated_field_update() -> None:
     )
 
     assert proposal.field_updates == {}
+
+
+
+def test_parse_json_object_accepts_fenced_json() -> None:
+    payload = _parse_json_object(
+        '```json\n{"confidence":0.95,"field_updates":{"closing_balance":"513.35"}}\n```'
+    )
+    assert payload["confidence"] == 0.95
+    assert payload["field_updates"]["closing_balance"] == "513.35"
+
+
+def test_parse_json_object_recovers_json_from_model_commentary() -> None:
+    payload = _parse_json_object(
+        'Here is the result: {"confidence":0.91,"field_updates":{},"field_removals":[],"evidence":{},"suggestions":[],"summary":"ok"}'
+    )
+    assert payload["confidence"] == 0.91
+    assert payload["summary"] == "ok"
