@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+import os
+import time
 from dataclasses import asdict
 from functools import lru_cache
 from pathlib import Path
@@ -20,6 +22,7 @@ from app.extraction.financial import (
 from app.layout.profile import build_layout_fingerprint, match_layout_profile
 from app.agents.invoice_resolver import apply_proposal, resolve_invoice
 from app.agents.document_reviewer import apply_document_proposal, review_document
+from app.agents.glm_ocr_reviewer import glm_ocr_useful, review_with_glm_ocr
 from app.classification.service import classification_service
 from app.pdftext.poppler import parse_bbox_layout
 from app.ocr.rapidocr_adapter import RapidOCREngine
@@ -394,18 +397,53 @@ def run_agent_invoice_resolution(request: AgentInvoiceResolveRequest) -> dict[st
 @app.post("/v1/agent/review-document")
 def run_agent_document_review(request: AgentDocumentReviewRequest) -> dict[str, Any]:
     try:
-        proposal = review_document(
-            document_type=request.document_type,
-            canonical=request.canonical,
-            validation=request.validation,
-            pages=request.pages,
-        )
+        tier = "qwen_fallback"
+        escalated = False
+        glm_elapsed_ms: int | None = None
+        glm_error: str | None = None
+        proposal = None
+
+        glm_enabled = os.getenv("GLM_OCR_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+        if glm_enabled and request.document_type.strip().lower() == "supplier_statement":
+            try:
+                proposal, glm_elapsed_ms = review_with_glm_ocr(
+                    document_type=request.document_type,
+                    canonical=request.canonical,
+                    validation=request.validation,
+                    pages=request.pages,
+                )
+                if glm_ocr_useful(proposal):
+                    tier = "glm_ocr"
+                else:
+                    proposal = None
+                    escalated = True
+            except Exception as exc:
+                glm_error = str(exc)[:500]
+                proposal = None
+                escalated = True
+
+        fallback_elapsed_ms: int | None = None
+        if proposal is None:
+            started = time.perf_counter()
+            proposal = review_document(
+                document_type=request.document_type,
+                canonical=request.canonical,
+                validation=request.validation,
+                pages=request.pages,
+            )
+            fallback_elapsed_ms = int((time.perf_counter() - started) * 1000)
+
         resolved = apply_document_proposal(request.canonical, proposal, request.pages)
         return {
             "provider": proposal.provider,
             "model": proposal.model,
             "prompt_version": proposal.prompt_version,
             "confidence": proposal.confidence,
+            "review_tier": tier,
+            "escalated": escalated,
+            "glm_elapsed_ms": glm_elapsed_ms,
+            "fallback_elapsed_ms": fallback_elapsed_ms,
+            "glm_error": glm_error,
             "field_updates": proposal.field_updates,
             "field_removals": proposal.field_removals,
             "evidence": proposal.evidence,
