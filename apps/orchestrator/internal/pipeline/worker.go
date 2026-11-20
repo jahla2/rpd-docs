@@ -547,6 +547,26 @@ func (w *Worker) HandlePreprocess(ctx context.Context, job JobMessage) error {
                 }
             }
         }
+    } else if canonical.DocumentType=="supplier_statement" && w.AgentFallbackEnabled && (canonical.RequiresReview || validationResult.RequiresReview) {
+        resolved,trace,agentErr:=w.tryDocumentReview(ctx,job,canonical.DocumentType,canonicalBody,validationResult,extractions)
+        if agentErr!=nil {
+            w.Logger.Warn("document_review_agent_skipped","error",agentErr,"document_id",job.DocumentID)
+        } else {
+            agentTrace=trace
+            if len(resolved)>0 {
+                candidateValidation,validateErr:=validation.ValidateDocument(resolved,canonical.DocumentType,"0.01")
+                if validateErr==nil {
+                    var traceEnvelope map[string]any
+                    _=json.Unmarshal(trace,&traceEnvelope)
+                    confidence,_:=traceEnvelope["confidence"].(float64)
+                    if confidence>=w.AgentMinConfidence && !candidateValidation.RequiresReview {
+                        canonicalBody=resolved
+                        validationResult=candidateValidation
+                        canonical.RequiresReview=lookupReviewRequired
+                    }
+                }
+            }
+        }
     }
 
     validationBody,err:=json.MarshalIndent(validationResult,"","  ")
@@ -1594,6 +1614,39 @@ func (w *Worker) tryAgentFallback(
     resolved,err:=json.MarshalIndent(envelope.ResolvedCanonical,"","  ")
     return resolved,response,err
 }
+
+func (w *Worker) tryDocumentReview(
+    ctx context.Context,job JobMessage,documentType string,canonicalBody []byte,validationResult validation.Result,pages []pageExtraction,
+)([]byte,[]byte,error){
+    var canonical map[string]any
+    if err:=json.Unmarshal(canonicalBody,&canonical); err!=nil { return nil,nil,err }
+    validationJSON,err:=json.Marshal(validationResult)
+    if err!=nil { return nil,nil,err }
+    var validationMap map[string]any
+    if err:=json.Unmarshal(validationJSON,&validationMap); err!=nil { return nil,nil,err }
+
+    response,err:=w.postJSON(ctx,"/v1/agent/review-document",map[string]any{
+        "document_id":job.DocumentID,
+        "document_type":documentType,
+        "trigger_code":"DETERMINISTIC_REVIEW_REQUIRED",
+        "canonical":canonical,
+        "validation":validationMap,
+        "pages":pages,
+    })
+    if err!=nil { return nil,nil,err }
+
+    var envelope struct {
+        Confidence float64 `json:"confidence"`
+        ResolvedCanonical map[string]any `json:"resolved_canonical"`
+    }
+    if err:=json.Unmarshal(response,&envelope); err!=nil { return nil,nil,err }
+    if envelope.Confidence<w.AgentMinConfidence || envelope.ResolvedCanonical==nil {
+        return nil,response,nil
+    }
+    resolved,err:=json.MarshalIndent(envelope.ResolvedCanonical,"","  ")
+    return resolved,response,err
+}
+
 
 func (w *Worker) persistAgentRun(ctx context.Context,job JobMessage,versionID string,trace []byte) error {
     var envelope struct {
