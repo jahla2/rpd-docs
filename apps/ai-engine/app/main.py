@@ -413,7 +413,17 @@ def run_agent_document_review(request: AgentDocumentReviewRequest) -> dict[str, 
                     pages=request.pages,
                 )
                 if glm_ocr_useful(proposal):
-                    tier = "glm_ocr"
+                    preview = apply_document_proposal(request.canonical, proposal, request.pages)
+                    preview_fields = preview.get("fields") or {}
+                    required_complete = all(
+                        bool((preview_fields.get(name) or {}).get("value"))
+                        for name in ("supplier_name", "closing_balance")
+                    )
+                    if required_complete:
+                        tier = "glm_ocr"
+                    else:
+                        proposal = None
+                        escalated = True
                 else:
                     proposal = None
                     escalated = True
