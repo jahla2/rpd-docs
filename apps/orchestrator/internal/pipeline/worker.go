@@ -559,10 +559,22 @@ func (w *Worker) HandlePreprocess(ctx context.Context, job JobMessage) error {
                     var traceEnvelope map[string]any
                     _=json.Unmarshal(trace,&traceEnvelope)
                     confidence,_:=traceEnvelope["confidence"].(float64)
-                    if confidence>=w.AgentMinConfidence && !candidateValidation.RequiresReview {
+
+                    currentFailures:=0
+                    for _,rule:=range validationResult.Rules {
+                        if rule.Status=="FAIL" && rule.Severity=="ERROR" { currentFailures++ }
+                    }
+                    candidateFailures:=0
+                    for _,rule:=range candidateValidation.Rules {
+                        if rule.Status=="FAIL" && rule.Severity=="ERROR" { candidateFailures++ }
+                    }
+
+                    var candidateCanonical CanonicalResponse
+                    canonicalErr:=json.Unmarshal(resolved,&candidateCanonical)
+                    if confidence>=w.AgentMinConfidence && canonicalErr==nil && candidateFailures<=currentFailures {
                         canonicalBody=resolved
                         validationResult=candidateValidation
-                        canonical.RequiresReview=lookupReviewRequired
+                        canonical.RequiresReview=candidateCanonical.RequiresReview || candidateValidation.RequiresReview || lookupReviewRequired
                     }
                 }
             }
