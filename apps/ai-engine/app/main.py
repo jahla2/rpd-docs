@@ -400,50 +400,73 @@ def run_agent_document_review(request: AgentDocumentReviewRequest) -> dict[str, 
         tier = "qwen_fallback"
         escalated = False
         glm_elapsed_ms: int | None = None
+        fallback_elapsed_ms: int | None = None
         glm_error: str | None = None
+        qwen_error: str | None = None
+
         proposal = None
+        glm_proposal = None
+        glm_resolved = None
+        review_canonical = request.canonical
 
         glm_enabled = os.getenv("GLM_OCR_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
         if glm_enabled and request.document_type.strip().lower() == "supplier_statement":
             try:
-                proposal, glm_elapsed_ms = review_with_glm_ocr(
+                glm_proposal, glm_elapsed_ms = review_with_glm_ocr(
                     document_type=request.document_type,
                     canonical=request.canonical,
                     validation=request.validation,
                     pages=request.pages,
                 )
-                if glm_ocr_useful(proposal):
-                    preview = apply_document_proposal(request.canonical, proposal, request.pages)
-                    preview_fields = preview.get("fields") or {}
+                if glm_ocr_useful(glm_proposal):
+                    glm_resolved = apply_document_proposal(request.canonical, glm_proposal, request.pages)
+                    review_canonical = glm_resolved
+                    preview_fields = glm_resolved.get("fields") or {}
                     required_complete = all(
                         bool((preview_fields.get(name) or {}).get("value"))
                         for name in ("supplier_name", "closing_balance")
                     )
                     if required_complete:
+                        proposal = glm_proposal
                         tier = "glm_ocr"
                     else:
-                        proposal = None
                         escalated = True
+                        tier = "glm_ocr_partial_qwen"
                 else:
-                    proposal = None
+                    glm_proposal = None
                     escalated = True
             except Exception as exc:
                 glm_error = str(exc)[:500]
-                proposal = None
+                glm_proposal = None
                 escalated = True
 
-        fallback_elapsed_ms: int | None = None
         if proposal is None:
             started = time.perf_counter()
-            proposal = review_document(
-                document_type=request.document_type,
-                canonical=request.canonical,
-                validation=request.validation,
-                pages=request.pages,
-            )
-            fallback_elapsed_ms = int((time.perf_counter() - started) * 1000)
+            try:
+                qwen_proposal = review_document(
+                    document_type=request.document_type,
+                    canonical=review_canonical,
+                    validation=request.validation,
+                    pages=request.pages,
+                )
+                fallback_elapsed_ms = int((time.perf_counter() - started) * 1000)
+                proposal = qwen_proposal
+                tier = "glm_ocr_plus_qwen" if glm_resolved is not None else "qwen_fallback"
+            except Exception as exc:
+                fallback_elapsed_ms = int((time.perf_counter() - started) * 1000)
+                qwen_error = str(exc)[:500]
+                if glm_proposal is not None and glm_resolved is not None:
+                    proposal = glm_proposal
+                    tier = "glm_ocr_partial"
+                else:
+                    raise
 
-        resolved = apply_document_proposal(request.canonical, proposal, request.pages)
+        base_canonical = glm_resolved if tier == "glm_ocr_plus_qwen" and glm_resolved is not None else request.canonical
+        resolved = (
+            apply_document_proposal(base_canonical, proposal, request.pages)
+            if tier != "glm_ocr_partial"
+            else glm_resolved
+        )
         return {
             "provider": proposal.provider,
             "model": proposal.model,
@@ -454,6 +477,7 @@ def run_agent_document_review(request: AgentDocumentReviewRequest) -> dict[str, 
             "glm_elapsed_ms": glm_elapsed_ms,
             "fallback_elapsed_ms": fallback_elapsed_ms,
             "glm_error": glm_error,
+            "qwen_error": qwen_error,
             "field_updates": proposal.field_updates,
             "field_removals": proposal.field_removals,
             "evidence": proposal.evidence,
