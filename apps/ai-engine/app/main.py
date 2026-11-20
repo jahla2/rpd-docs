@@ -485,7 +485,23 @@ def run_agent_document_review(request: AgentDocumentReviewRequest) -> dict[str, 
             "summary": proposal.summary,
             "resolved_canonical": resolved,
         }
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"DOCUMENT_REVIEW_FAILED: {exc}") from exc
+        message = str(exc)[:1000]
+        return {
+            "provider": os.getenv("AGENT_PROVIDER", "disabled"),
+            "model": os.getenv("AGENT_MODEL", ""),
+            "prompt_version": "document-review-failed-v1",
+            "confidence": 0.0,
+            "review_tier": "failed",
+            "escalated": True,
+            "glm_elapsed_ms": None,
+            "fallback_elapsed_ms": None,
+            "glm_error": None,
+            "qwen_error": message,
+            "field_updates": {},
+            "field_removals": [],
+            "evidence": {},
+            "suggestions": [],
+            "summary": "AI review failed safely; deterministic review remains authoritative.",
+            "resolved_canonical": request.canonical,
+        }
