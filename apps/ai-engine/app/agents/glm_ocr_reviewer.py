@@ -238,7 +238,9 @@ def review_with_glm_ocr(
 
 
 def glm_ocr_useful(proposal: DocumentReviewProposal) -> bool:
-    threshold = float(os.getenv("GLM_OCR_MIN_CONFIDENCE", "0.88"))
+    glm_threshold = float(os.getenv("GLM_OCR_MIN_CONFIDENCE", "0.90"))
+    agent_threshold = float(os.getenv("AGENT_MIN_CONFIDENCE", "0.90"))
+    threshold = max(glm_threshold, agent_threshold)
     return (
         proposal.confidence >= max(0.0, min(1.0, threshold))
         and bool(proposal.field_updates or proposal.field_removals)
