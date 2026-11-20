@@ -92,7 +92,9 @@ def test_supplier_statement_review_applies_only_evidence_backed_values() -> None
     assert resolved["fields"]["currency"]["value"] == "NZD"
     assert resolved["fields"]["closing_balance"]["value"] == "513.35"
     assert "account_number" not in resolved["fields"]
-    assert resolved["requires_review"] is False
+    assert resolved["requires_review"] is True
+    assert resolved["validation"]["transaction_mapping_incomplete"] is True
+    assert resolved["validation"]["incomplete_transaction_rows"] == [1]
     assert resolved["agent_review"]["model"] == "qwen3.5:9b"
 
 
