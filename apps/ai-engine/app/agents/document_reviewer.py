@@ -346,6 +346,127 @@ def _execute_tool(
     raise RuntimeError(f"unsupported review tool {name!r}")
 
 
+def _structured_review_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+            "field_updates": {
+                "type": "object",
+                "additionalProperties": {"type": "string"},
+            },
+            "field_removals": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+            "evidence": {
+                "type": "object",
+                "additionalProperties": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+            },
+            "suggestions": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+            "summary": {"type": "string"},
+        },
+        "required": [
+            "confidence",
+            "field_updates",
+            "field_removals",
+            "evidence",
+            "suggestions",
+            "summary",
+        ],
+    }
+
+
+def _direct_review_context(
+    *,
+    canonical: dict[str, Any],
+    validation: dict[str, Any],
+    pages: list[dict[str, Any]],
+) -> dict[str, Any]:
+    ocr_blocks: list[dict[str, Any]] = []
+    for block in _block_lookup(pages).values():
+        ocr_blocks.append({
+            "block_id": block["block_id"],
+            "page": block["page"],
+            "text": block["text"],
+            "confidence": block["confidence"],
+        })
+        if len(ocr_blocks) >= 220:
+            break
+
+    table_pages = []
+    for page in pages[:5]:
+        table_pages.append({
+            "page": page.get("page"),
+            "rows": parse_table_html(page.get("table_html"))[:30],
+        })
+
+    return {
+        "canonical": canonical,
+        "validation": validation,
+        "ocr_blocks": ocr_blocks,
+        "table_pages": table_pages,
+    }
+
+
+def _ollama_structured_review(
+    base_url: str,
+    model: str,
+    *,
+    document_type: str,
+    canonical: dict[str, Any],
+    validation: dict[str, Any],
+    pages: list[dict[str, Any]],
+    num_ctx: int,
+) -> dict[str, Any]:
+    context = _direct_review_context(
+        canonical=canonical,
+        validation=validation,
+        pages=pages,
+    )
+    schema = _structured_review_schema()
+    prompt = (
+        _system_prompt(document_type)
+        + "\nThe model did not emit a tool call, so perform the review from this bounded evidence packet. "
+        + "Return only JSON matching the supplied schema. Every field update must include OCR block IDs from "
+        + "the evidence packet. Never invent block IDs or values.\nEvidence packet:\n"
+        + json.dumps(context, separators=(",", ":"), ensure_ascii=False)
+    )
+    response = httpx.post(
+        base_url.rstrip("/") + "/api/chat",
+        timeout=120.0,
+        json={
+            "model": model,
+            "stream": False,
+            "think": False,
+            "format": schema,
+            "options": {
+                "temperature": 0,
+                "num_ctx": max(4096, min(32768, num_ctx)),
+            },
+            "messages": [{"role": "user", "content": prompt}],
+        },
+    )
+    response.raise_for_status()
+    outer = response.json()
+    content = str(((outer.get("message") or {}).get("content") or "")).strip()
+    if not content:
+        raise RuntimeError("document review agent returned empty structured output")
+    try:
+        payload = json.loads(content)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("document review agent returned invalid structured JSON") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("document review agent returned non-object structured JSON")
+    return payload
+
+
 def _ollama_review(
     base_url: str,
     model: str,
@@ -389,7 +510,15 @@ def _ollama_review(
 
         tool_calls = message.get("tool_calls") or []
         if not tool_calls:
-            raise RuntimeError("document review agent returned no tool call")
+            return _ollama_structured_review(
+                base_url,
+                model,
+                document_type=document_type,
+                canonical=canonical,
+                validation=validation,
+                pages=pages,
+                num_ctx=num_ctx,
+            )
 
         for call in tool_calls:
             function = call.get("function") or {}
