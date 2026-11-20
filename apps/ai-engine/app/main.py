@@ -19,6 +19,7 @@ from app.extraction.financial import (
 )
 from app.layout.profile import build_layout_fingerprint, match_layout_profile
 from app.agents.invoice_resolver import apply_proposal, resolve_invoice
+from app.agents.document_reviewer import apply_document_proposal, review_document
 from app.classification.service import classification_service
 from app.pdftext.poppler import parse_bbox_layout
 from app.ocr.rapidocr_adapter import RapidOCREngine
@@ -355,6 +356,15 @@ class AgentInvoiceResolveRequest(BaseModel):
     pages: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class AgentDocumentReviewRequest(BaseModel):
+    document_id: str
+    document_type: str
+    trigger_code: str
+    canonical: dict[str, Any]
+    validation: dict[str, Any]
+    pages: list[dict[str, Any]] = Field(default_factory=list)
+
+
 @app.post("/v1/agent/resolve-invoice")
 def run_agent_invoice_resolution(request: AgentInvoiceResolveRequest) -> dict[str, Any]:
     try:
@@ -379,3 +389,31 @@ def run_agent_invoice_resolution(request: AgentInvoiceResolveRequest) -> dict[st
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"AGENT_RESOLUTION_FAILED: {exc}") from exc
+
+
+@app.post("/v1/agent/review-document")
+def run_agent_document_review(request: AgentDocumentReviewRequest) -> dict[str, Any]:
+    try:
+        proposal = review_document(
+            document_type=request.document_type,
+            canonical=request.canonical,
+            validation=request.validation,
+            pages=request.pages,
+        )
+        resolved = apply_document_proposal(request.canonical, proposal, request.pages)
+        return {
+            "provider": proposal.provider,
+            "model": proposal.model,
+            "prompt_version": proposal.prompt_version,
+            "confidence": proposal.confidence,
+            "field_updates": proposal.field_updates,
+            "field_removals": proposal.field_removals,
+            "evidence": proposal.evidence,
+            "suggestions": proposal.suggestions,
+            "summary": proposal.summary,
+            "resolved_canonical": resolved,
+        }
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"DOCUMENT_REVIEW_FAILED: {exc}") from exc
