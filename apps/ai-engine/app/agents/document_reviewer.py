@@ -347,6 +347,40 @@ def _execute_tool(
     raise RuntimeError(f"unsupported review tool {name!r}")
 
 
+def _parse_json_object(content: str) -> dict[str, Any]:
+    text = content.strip()
+    if not text:
+        raise RuntimeError("document review agent returned empty structured output")
+
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+
+    try:
+        value = json.loads(text)
+        if isinstance(value, dict):
+            return value
+    except json.JSONDecodeError:
+        pass
+
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(text):
+        if char != "{":
+            continue
+        try:
+            value, _ = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            return value
+
+    raise RuntimeError("document review agent returned invalid structured JSON")
+
+
 def _structured_review_schema() -> dict[str, Any]:
     return {
         "type": "object",
@@ -457,15 +491,38 @@ def _ollama_structured_review(
     response.raise_for_status()
     outer = response.json()
     content = str(((outer.get("message") or {}).get("content") or "")).strip()
-    if not content:
-        raise RuntimeError("document review agent returned empty structured output")
     try:
-        payload = json.loads(content)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("document review agent returned invalid structured JSON") from exc
-    if not isinstance(payload, dict):
-        raise RuntimeError("document review agent returned non-object structured JSON")
-    return payload
+        return _parse_json_object(content)
+    except RuntimeError:
+        retry = httpx.post(
+            base_url.rstrip("/") + "/api/chat",
+            timeout=120.0,
+            json={
+                "model": model,
+                "stream": False,
+                "think": False,
+                "format": "json",
+                "options": {
+                    "temperature": 0,
+                    "num_ctx": max(4096, min(32768, num_ctx)),
+                },
+                "messages": [{
+                    "role": "user",
+                    "content": (
+                        "Return one valid JSON object only. Do not use markdown or commentary. "
+                        "Use exactly these keys: confidence, field_updates, field_removals, evidence, suggestions, summary. "
+                        "Every update must use only values and OCR block IDs present in this evidence packet. "
+                        "If uncertain, return an empty field_updates object and confidence below 0.90. "
+                        "Evidence packet: "
+                        + json.dumps(context, separators=(",", ":"), ensure_ascii=False)
+                    ),
+                }],
+            },
+        )
+        retry.raise_for_status()
+        retry_outer = retry.json()
+        retry_content = str(((retry_outer.get("message") or {}).get("content") or "")).strip()
+        return _parse_json_object(retry_content)
 
 
 def _ollama_review(
