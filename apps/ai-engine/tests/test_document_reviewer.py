@@ -1,4 +1,10 @@
-from app.agents.document_reviewer import _parse_json_object, _sanitize_proposal, apply_document_proposal
+from app.agents.document_reviewer import (
+    DocumentReviewProposal,
+    _compact_canonical,
+    _proposal_acceptable,
+    _sanitize_proposal,
+    apply_document_proposal,
+)
 
 
 def _pages() -> list[dict]:
@@ -116,17 +122,70 @@ def test_supplier_statement_review_rejects_hallucinated_field_update() -> None:
 
 
 
-def test_parse_json_object_accepts_fenced_json() -> None:
-    payload = _parse_json_object(
-        '```json\n{"confidence":0.95,"field_updates":{"closing_balance":"513.35"}}\n```'
-    )
-    assert payload["confidence"] == 0.95
-    assert payload["field_updates"]["closing_balance"] == "513.35"
+
+def test_compact_canonical_drops_heavy_layout_metadata() -> None:
+    compact = _compact_canonical({
+        "document_type": "supplier_statement",
+        "fields": {
+            "supplier_name": {"value": "Redwood Identity Services Ltd", "raw": "Redwood Identity Services Ltd"}
+        },
+        "tables": {
+            "transactions": [
+                {
+                    "page": 1,
+                    "date": "2026-04-04",
+                    "invoice_number": "RED-26310",
+                    "credit": "0.00",
+                    "unexpected": "drop-me",
+                }
+            ]
+        },
+        "table_metadata": [{"huge": "payload"}],
+        "layout": {"huge": "payload"},
+        "requires_review": True,
+    })
+
+    assert "table_metadata" not in compact
+    assert "layout" not in compact
+    assert compact["transactions"][0]["invoice_number"] == "RED-26310"
+    assert "unexpected" not in compact["transactions"][0]
 
 
-def test_parse_json_object_recovers_json_from_model_commentary() -> None:
-    payload = _parse_json_object(
-        'Here is the result: {"confidence":0.91,"field_updates":{},"field_removals":[],"evidence":{},"suggestions":[],"summary":"ok"}'
+def test_proposal_acceptance_requires_required_fields(monkeypatch) -> None:
+    monkeypatch.setenv("AGENT_MIN_CONFIDENCE", "0.90")
+    canonical = {
+        "fields": {},
+    }
+    partial = DocumentReviewProposal(
+        provider="ollama",
+        model="ministral-3:8b",
+        prompt_version="document-reviewer-langgraph-v2",
+        confidence=0.97,
+        field_updates={"closing_balance": "513.35"},
+        field_removals=[],
+        evidence={"closing_balance": ["p001-t0044"]},
+        suggestions=[],
+        summary="partial",
+        raw_response={},
     )
-    assert payload["confidence"] == 0.91
-    assert payload["summary"] == "ok"
+    assert _proposal_acceptable(partial, canonical=canonical) is False
+
+    complete = DocumentReviewProposal(
+        provider="ollama",
+        model="ministral-3:8b",
+        prompt_version="document-reviewer-langgraph-v2",
+        confidence=0.97,
+        field_updates={
+            "supplier_name": "Redwood Identity Services Ltd",
+            "closing_balance": "513.35",
+        },
+        field_removals=[],
+        evidence={
+            "supplier_name": ["p001-t0002"],
+            "closing_balance": ["p001-t0044"],
+        },
+        suggestions=[],
+        summary="complete",
+        raw_response={},
+    )
+    assert _proposal_acceptable(complete, canonical=canonical) is True
